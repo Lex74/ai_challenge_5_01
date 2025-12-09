@@ -15,6 +15,9 @@ logger = logging.getLogger(__name__)
 # Дефолтный системный промпт
 DEFAULT_SYSTEM_PROMPT = "Ты успешный личный коуч. Клиент хочет поставить цель и достичь её. После каждого сообщения пользователя ты должен задавать ему вопросы, пока не получишь всю необходимую информацию, чтобы собрать цель по фреймворку SMART. SMART означает: S - Specific (Конкретная), M - Measurable (Измеримая), A - Achievable (Достижимая), R - Relevant (Релевантная), T - Time-bound (Ограниченная по времени). Задавай вопросы по одному, будь дружелюбным и поддерживающим. ВАЖНО: Когда соберёшь всю информацию и сформулируешь финальную цель по SMART, ОБЯЗАТЕЛЬНО добавь в конец своего ответа специальный маркер: [[ЦЕЛЬ_СФОРМУЛИРОВАНА]]. Этот маркер используй ТОЛЬКО когда формулируешь финальную цель, НИКОГДА не используй его в вопросах или промежуточных ответах. КРИТИЧЕСКИ ВАЖНО: Когда формулируешь финальную цель (когда добавляешь маркер [[ЦЕЛЬ_СФОРМУЛИРОВАНА]]), НЕ задавай никаких вопросов в этом сообщении. Просто сформулируй цель и заверши сообщение. Продолжай диалог с того места, где остановились."
 
+# Дефолтная температура для запросов
+DEFAULT_TEMPERATURE = 0.2
+
 # Специальный маркер, который модель должна использовать только при формулировке финальной цели
 GOAL_FORMULATED_MARKER = "[[ЦЕЛЬ_СФОРМУЛИРОВАНА]]"
 
@@ -26,12 +29,16 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Сбрасываем промпт к дефолтному при старте
     if 'system_prompt' in context.user_data:
         del context.user_data['system_prompt']
+    # Сбрасываем температуру к дефолтной при старте
+    if 'temperature' in context.user_data:
+        del context.user_data['temperature']
     
     await update.message.reply_text(
         "Привет! Я твой личный коуч 🤝\n\n"
         "Я помогу тебе поставить цель и достичь её, используя фреймворк SMART.\n\n"
         "Просто расскажи мне, какую цель ты хочешь поставить, и я задам тебе вопросы, "
-        "чтобы мы вместе сформулировали её правильно!"
+        "чтобы мы вместе сформулировали её правильно!\n\n"
+        "/help - показать справку\n"
     )
 
 
@@ -51,7 +58,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/help - показать эту справку\n"
         "/setprompt - установить новый системный промпт\n"
         "/getprompt - показать текущий системный промпт\n"
-        "/resetprompt - сбросить системный промпт к дефолтному"
+        "/resetprompt - сбросить системный промпт к дефолтному\n"
+        "/settemp - установить температуру запроса (0.0-2.0)\n"
+        "/gettemp - показать текущую температуру\n"
+        "/resettemp - сбросить температуру к дефолтной (0.2)\n\n"
+        "Температура влияет на креативность ответов (диапазон: 0.0-1.0)"
     )
 
 
@@ -103,6 +114,66 @@ async def resetprompt_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         "✅ Системный промпт сброшен к дефолтному значению."
     )
     logger.info(f"Пользователь {update.effective_user.id} сбросил системный промпт к дефолтному")
+
+
+async def settemp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /settemp для установки температуры запроса"""
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text(
+            "Использование: /settemp <температура>\n\n"
+            "Температура должна быть числом от 0.0 до 1.0.\n"
+            "Пример: /settemp 0.7\n\n"
+            "Чем выше температура, тем более креативными и случайными будут ответы.\n"
+            "Чем ниже температура, тем более детерминированными и точными."
+        )
+        return
+    
+    try:
+        new_temp = float(context.args[0])
+        
+        # Проверяем диапазон температуры (Perplexity API поддерживает 0.0-1.0)
+        if new_temp < 0.0 or new_temp > 1.0:
+            await update.message.reply_text(
+                "❌ Температура должна быть в диапазоне от 0.0 до 1.0."
+            )
+            return
+        
+        # Сохраняем температуру в user_data
+        context.user_data['temperature'] = new_temp
+        
+        await update.message.reply_text(
+            f"✅ Температура установлена: {new_temp}"
+        )
+        logger.info(f"Пользователь {update.effective_user.id} установил температуру: {new_temp}")
+        
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Ошибка: температура должна быть числом.\n"
+            "Пример: /settemp 0.7"
+        )
+
+
+async def gettemp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /gettemp для просмотра текущей температуры"""
+    # Получаем текущую температуру или используем дефолтную
+    current_temp = context.user_data.get('temperature', DEFAULT_TEMPERATURE)
+    is_default = 'temperature' not in context.user_data
+    
+    temp_text = f"Текущая температура: {current_temp}{' (дефолтная)' if is_default else ''}"
+    
+    await update.message.reply_text(temp_text)
+
+
+async def resettemp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /resettemp для сброса температуры к дефолтной"""
+    # Удаляем кастомную температуру
+    if 'temperature' in context.user_data:
+        del context.user_data['temperature']
+    
+    await update.message.reply_text(
+        f"✅ Температура сброшена к дефолтному значению: {DEFAULT_TEMPERATURE}"
+    )
+    logger.info(f"Пользователь {update.effective_user.id} сбросил температуру к дефолтной")
 
 def is_goal_formulated(answer: str) -> bool:
     """Проверяет, сформулировал ли бот финальную цель по наличию специального маркера"""
@@ -171,7 +242,7 @@ def convert_markdown_to_telegram(text: str) -> str:
     return text
 
 
-async def query_perplexity(question: str, conversation_history: list, system_prompt: str) -> tuple[str, list]:
+async def query_perplexity(question: str, conversation_history: list, system_prompt: str, temperature: float) -> tuple[str, list]:
     """Отправляет запрос в Perplexity API и возвращает ответ и обновленную историю"""
     headers = {
         "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
@@ -198,7 +269,7 @@ async def query_perplexity(question: str, conversation_history: list, system_pro
     payload = {
         "model": "sonar-pro",
         "messages": messages,
-        "temperature": 0.2,
+        "temperature": temperature,
         "max_tokens": 1000
     }
     
@@ -226,6 +297,16 @@ async def query_perplexity(question: str, conversation_history: list, system_pro
         else:
             return "Извините, не удалось получить ответ от API.", conversation_history
             
+    except requests.exceptions.HTTPError as e:
+        # Логируем детали ошибки для диагностики
+        error_details = ""
+        try:
+            error_response = e.response.json()
+            error_details = f" Детали: {error_response}"
+            logger.error(f"HTTP ошибка от Perplexity API: {e.response.status_code} - {error_response}")
+        except:
+            logger.error(f"HTTP ошибка от Perplexity API: {e.response.status_code} - {e.response.text}")
+        return f"Произошла ошибка при обращении к API: {str(e)}{error_details}", conversation_history
     except requests.exceptions.RequestException as e:
         logger.error(f"Ошибка при запросе к Perplexity API: {e}")
         return f"Произошла ошибка при обращении к API: {str(e)}", conversation_history
@@ -259,9 +340,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         # Получаем системный промпт из user_data или используем дефолтный
         system_prompt = context.user_data.get('system_prompt', DEFAULT_SYSTEM_PROMPT)
+        # Получаем температуру из user_data или используем дефолтную
+        temperature = context.user_data.get('temperature', DEFAULT_TEMPERATURE)
         
         # Получаем ответ от Perplexity с историей диалога
-        answer, updated_history = await query_perplexity(user_message, conversation_history, system_prompt)
+        answer, updated_history = await query_perplexity(user_message, conversation_history, system_prompt, temperature)
         
         # Проверяем, сформулировал ли бот финальную цель
         goal_formulated = is_goal_formulated(answer)
@@ -315,6 +398,9 @@ def main():
     application.add_handler(CommandHandler("setprompt", setprompt_command))
     application.add_handler(CommandHandler("getprompt", getprompt_command))
     application.add_handler(CommandHandler("resetprompt", resetprompt_command))
+    application.add_handler(CommandHandler("settemp", settemp_command))
+    application.add_handler(CommandHandler("gettemp", gettemp_command))
+    application.add_handler(CommandHandler("resettemp", resettemp_command))
     
     # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
