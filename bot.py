@@ -1,6 +1,7 @@
 import logging
 import requests
 import re
+import time
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from config import TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, OPENAI_API_URL
@@ -330,14 +331,43 @@ async def query_openai(question: str, conversation_history: list, system_prompt:
     }
     
     try:
+        # Засекаем время начала запроса
+        start_time = time.time()
+        
         response = requests.post(OPENAI_API_URL, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
+        
+        # Засекаем время окончания запроса
+        end_time = time.time()
+        response_time = end_time - start_time
         
         data = response.json()
         
         # Извлекаем ответ из структуры ответа OpenAI
         if 'choices' in data and len(data['choices']) > 0:
             answer = data['choices'][0]['message']['content']
+            
+            # Извлекаем информацию из ответа API
+            usage = data.get('usage', {})
+            total_tokens = usage.get('total_tokens', 0)
+            total_cost = usage.get('total_cost')  # Если есть в ответе API
+            
+            # Логируем информацию о запросе (данные из JSON ответа)
+            log_message = (
+                f"OpenAI API запрос - Модель: {model}, "
+                f"Время ответа: {response_time:.3f}с, "
+                f"Total tokens: {total_tokens}"
+            )
+            
+            if total_cost is not None:
+                log_message += f", Total cost: {total_cost}"
+            
+            # Добавляем все остальные поля из usage, если они есть
+            other_fields = {k: v for k, v in usage.items() if k not in ['total_tokens', 'total_cost']}
+            if other_fields:
+                log_message += f", Usage: {other_fields}"
+            
+            logger.info(log_message)
             
             # Обновляем историю: добавляем вопрос пользователя и ответ бота
             updated_history = conversation_history.copy()
