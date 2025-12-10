@@ -3,7 +3,7 @@ import requests
 import re
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from config import TELEGRAM_BOT_TOKEN, PERPLEXITY_API_KEY, PERPLEXITY_API_URL
+from config import TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, OPENAI_API_URL
 
 # Настройка логирования
 logging.basicConfig(
@@ -62,7 +62,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/settemp - установить температуру запроса (0.0-2.0)\n"
         "/gettemp - показать текущую температуру\n"
         "/resettemp - сбросить температуру к дефолтной (0.2)\n\n"
-        "Температура влияет на креативность ответов (диапазон: 0.0-1.0)"
+            "Температура влияет на креативность ответов (диапазон: 0.0-2.0)"
     )
 
 
@@ -121,7 +121,7 @@ async def settemp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args or len(context.args) != 1:
         await update.message.reply_text(
             "Использование: /settemp <температура>\n\n"
-            "Температура должна быть числом от 0.0 до 1.0.\n"
+            "Температура должна быть числом от 0.0 до 2.0.\n"
             "Пример: /settemp 0.7\n\n"
             "Чем выше температура, тем более креативными и случайными будут ответы.\n"
             "Чем ниже температура, тем более детерминированными и точными."
@@ -131,10 +131,10 @@ async def settemp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         new_temp = float(context.args[0])
         
-        # Проверяем диапазон температуры (Perplexity API поддерживает 0.0-1.0)
-        if new_temp < 0.0 or new_temp > 1.0:
+        # Проверяем диапазон температуры (OpenAI API поддерживает 0.0-2.0)
+        if new_temp < 0.0 or new_temp > 2.0:
             await update.message.reply_text(
-                "❌ Температура должна быть в диапазоне от 0.0 до 1.0."
+                "❌ Температура должна быть в диапазоне от 0.0 до 2.0."
             )
             return
         
@@ -242,10 +242,10 @@ def convert_markdown_to_telegram(text: str) -> str:
     return text
 
 
-async def query_perplexity(question: str, conversation_history: list, system_prompt: str, temperature: float) -> tuple[str, list]:
-    """Отправляет запрос в Perplexity API и возвращает ответ и обновленную историю"""
+async def query_openai(question: str, conversation_history: list, system_prompt: str, temperature: float) -> tuple[str, list]:
+    """Отправляет запрос в OpenAI API и возвращает ответ и обновленную историю"""
     headers = {
-        "Authorization": f"Bearer {PERPLEXITY_API_KEY}",
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
     }
     
@@ -267,19 +267,19 @@ async def query_perplexity(question: str, conversation_history: list, system_pro
     })
     
     payload = {
-        "model": "sonar-pro",
+        "model": "gpt-4o-mini",
         "messages": messages,
         "temperature": temperature,
         "max_tokens": 1000
     }
     
     try:
-        response = requests.post(PERPLEXITY_API_URL, json=payload, headers=headers, timeout=30)
+        response = requests.post(OPENAI_API_URL, json=payload, headers=headers, timeout=30)
         response.raise_for_status()
         
         data = response.json()
         
-        # Извлекаем ответ из структуры ответа Perplexity
+        # Извлекаем ответ из структуры ответа OpenAI
         if 'choices' in data and len(data['choices']) > 0:
             answer = data['choices'][0]['message']['content']
             
@@ -303,12 +303,12 @@ async def query_perplexity(question: str, conversation_history: list, system_pro
         try:
             error_response = e.response.json()
             error_details = f" Детали: {error_response}"
-            logger.error(f"HTTP ошибка от Perplexity API: {e.response.status_code} - {error_response}")
+            logger.error(f"HTTP ошибка от OpenAI API: {e.response.status_code} - {error_response}")
         except:
-            logger.error(f"HTTP ошибка от Perplexity API: {e.response.status_code} - {e.response.text}")
+            logger.error(f"HTTP ошибка от OpenAI API: {e.response.status_code} - {e.response.text}")
         return f"Произошла ошибка при обращении к API: {str(e)}{error_details}", conversation_history
     except requests.exceptions.RequestException as e:
-        logger.error(f"Ошибка при запросе к Perplexity API: {e}")
+        logger.error(f"Ошибка при запросе к OpenAI API: {e}")
         return f"Произошла ошибка при обращении к API: {str(e)}", conversation_history
     except Exception as e:
         logger.error(f"Неожиданная ошибка: {e}")
@@ -343,8 +343,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем температуру из user_data или используем дефолтную
         temperature = context.user_data.get('temperature', DEFAULT_TEMPERATURE)
         
-        # Получаем ответ от Perplexity с историей диалога
-        answer, updated_history = await query_perplexity(user_message, conversation_history, system_prompt, temperature)
+        # Получаем ответ от OpenAI с историей диалога
+        answer, updated_history = await query_openai(user_message, conversation_history, system_prompt, temperature)
         
         # Проверяем, сформулировал ли бот финальную цель
         goal_formulated = is_goal_formulated(answer)
