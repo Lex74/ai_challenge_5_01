@@ -18,6 +18,9 @@ DEFAULT_SYSTEM_PROMPT = "Ты успешный личный коуч. Клиен
 # Дефолтная температура для запросов
 DEFAULT_TEMPERATURE = 0.2
 
+# Дефолтная модель OpenAI
+DEFAULT_MODEL = "gpt-4o-mini"
+
 # Специальный маркер, который модель должна использовать только при формулировке финальной цели
 GOAL_FORMULATED_MARKER = "[[ЦЕЛЬ_СФОРМУЛИРОВАНА]]"
 
@@ -32,6 +35,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Сбрасываем температуру к дефолтной при старте
     if 'temperature' in context.user_data:
         del context.user_data['temperature']
+    # Сбрасываем модель к дефолтной при старте
+    if 'model' in context.user_data:
+        del context.user_data['model']
     
     await update.message.reply_text(
         "Привет! Я твой личный коуч 🤝\n\n"
@@ -61,8 +67,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/resetprompt - сбросить системный промпт к дефолтному\n"
         "/settemp - установить температуру запроса (0.0-2.0)\n"
         "/gettemp - показать текущую температуру\n"
-        "/resettemp - сбросить температуру к дефолтной (0.2)\n\n"
-            "Температура влияет на креативность ответов (диапазон: 0.0-2.0)"
+        "/resettemp - сбросить температуру к дефолтной (0.2)\n"
+        "/setmodel - установить модель OpenAI (например: gpt-4o-mini, gpt-4o, gpt-3.5-turbo)\n"
+        "/getmodel - показать текущую модель\n"
+        "/resetmodel - сбросить модель к дефолтной (gpt-4o-mini)\n\n"
+        "Температура влияет на креативность ответов (диапазон: 0.0-2.0)"
     )
 
 
@@ -175,6 +184,53 @@ async def resettemp_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     logger.info(f"Пользователь {update.effective_user.id} сбросил температуру к дефолтной")
 
+
+async def setmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /setmodel для установки модели OpenAI"""
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text(
+            "Использование: /setmodel <модель>\n\n"
+            "Примеры моделей:\n"
+            "• gpt-4o-mini (быстрая и экономичная)\n"
+            "• gpt-4o (более мощная)\n"
+            "• gpt-3.5-turbo (старая версия)\n\n"
+            "Пример: /setmodel gpt-4o"
+        )
+        return
+    
+    new_model = context.args[0].strip()
+    
+    # Сохраняем модель в user_data
+    context.user_data['model'] = new_model
+    
+    await update.message.reply_text(
+        f"✅ Модель установлена: {new_model}"
+    )
+    logger.info(f"Пользователь {update.effective_user.id} установил модель: {new_model}")
+
+
+async def getmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /getmodel для просмотра текущей модели"""
+    # Получаем текущую модель или используем дефолтную
+    current_model = context.user_data.get('model', DEFAULT_MODEL)
+    is_default = 'model' not in context.user_data
+    
+    model_text = f"Текущая модель: {current_model}{' (дефолтная)' if is_default else ''}"
+    
+    await update.message.reply_text(model_text)
+
+
+async def resetmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /resetmodel для сброса модели к дефолтной"""
+    # Удаляем кастомную модель
+    if 'model' in context.user_data:
+        del context.user_data['model']
+    
+    await update.message.reply_text(
+        f"✅ Модель сброшена к дефолтному значению: {DEFAULT_MODEL}"
+    )
+    logger.info(f"Пользователь {update.effective_user.id} сбросил модель к дефолтной")
+
 def is_goal_formulated(answer: str) -> bool:
     """Проверяет, сформулировал ли бот финальную цель по наличию специального маркера"""
     return GOAL_FORMULATED_MARKER in answer
@@ -242,7 +298,7 @@ def convert_markdown_to_telegram(text: str) -> str:
     return text
 
 
-async def query_openai(question: str, conversation_history: list, system_prompt: str, temperature: float) -> tuple[str, list]:
+async def query_openai(question: str, conversation_history: list, system_prompt: str, temperature: float, model: str) -> tuple[str, list]:
     """Отправляет запрос в OpenAI API и возвращает ответ и обновленную историю"""
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -267,7 +323,7 @@ async def query_openai(question: str, conversation_history: list, system_prompt:
     })
     
     payload = {
-        "model": "gpt-4o-mini",
+        "model": model,
         "messages": messages,
         "temperature": temperature,
         "max_tokens": 1000
@@ -342,9 +398,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         system_prompt = context.user_data.get('system_prompt', DEFAULT_SYSTEM_PROMPT)
         # Получаем температуру из user_data или используем дефолтную
         temperature = context.user_data.get('temperature', DEFAULT_TEMPERATURE)
+        # Получаем модель из user_data или используем дефолтную
+        model = context.user_data.get('model', DEFAULT_MODEL)
         
         # Получаем ответ от OpenAI с историей диалога
-        answer, updated_history = await query_openai(user_message, conversation_history, system_prompt, temperature)
+        answer, updated_history = await query_openai(user_message, conversation_history, system_prompt, temperature, model)
         
         # Проверяем, сформулировал ли бот финальную цель
         goal_formulated = is_goal_formulated(answer)
@@ -401,6 +459,9 @@ def main():
     application.add_handler(CommandHandler("settemp", settemp_command))
     application.add_handler(CommandHandler("gettemp", gettemp_command))
     application.add_handler(CommandHandler("resettemp", resettemp_command))
+    application.add_handler(CommandHandler("setmodel", setmodel_command))
+    application.add_handler(CommandHandler("getmodel", getmodel_command))
+    application.add_handler(CommandHandler("resetmodel", resetmodel_command))
     
     # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
