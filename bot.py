@@ -4,7 +4,7 @@ import re
 import time
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from config import TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, OPENAI_API_URL
+from config import TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, OPENAI_API_URL, ADMIN_USER_ID
 
 # Настройка логирования
 logging.basicConfig(
@@ -22,8 +22,41 @@ DEFAULT_TEMPERATURE = 0.2
 # Дефолтная модель OpenAI
 DEFAULT_MODEL = "gpt-4o-mini"
 
+# Максимальное количество токенов для ответа
+MAX_TOKENS = 1000
+
+# Таймаут для запросов к OpenAI API (в секундах)
+API_TIMEOUT = 300  # 5 минут
+
 # Специальный маркер, который модель должна использовать только при формулировке финальной цели
 GOAL_FORMULATED_MARKER = "[[ЦЕЛЬ_СФОРМУЛИРОВАНА]]"
+
+# Цены на модели OpenAI (за 1 миллион токенов в долларах)
+# Формат: (input_price_per_1M, output_price_per_1M)
+MODEL_PRICING = {
+    "gpt-4o-mini": (0.15, 0.60),  # $0.15/$0.60 per 1M tokens
+    "gpt-4o": (2.50, 10.00),  # $2.50/$10.00 per 1M tokens
+    "gpt-4-turbo": (10.00, 30.00),  # $10.00/$30.00 per 1M tokens
+    "gpt-4": (30.00, 60.00),  # $30.00/$60.00 per 1M tokens
+    "gpt-3.5-turbo": (0.50, 1.50),  # $0.50/$1.50 per 1M tokens
+    "gpt-5": (1.25, 10.00),  # $1.25/$10.00 per 1M tokens
+    "gpt-5-mini": (0.25, 2.00),  # $0.25/$2.00 per 1M tokens
+    "gpt-5-nano": (0.05, 0.40),  # $0.05/$0.40 per 1M tokens
+}
+
+
+def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+    """Рассчитывает стоимость запроса на основе модели и количества токенов"""
+    if model not in MODEL_PRICING:
+        # Используем цены gpt-4o-mini как дефолтные для неизвестных моделей
+        input_price, output_price = MODEL_PRICING["gpt-4o-mini"]
+        logger.warning(f"Неизвестная модель {model}, используются дефолтные цены")
+    else:
+        input_price, output_price = MODEL_PRICING[model]
+    
+    # Цены указаны за 1 миллион токенов, поэтому делим на 1_000_000
+    cost = (prompt_tokens / 1_000_000 * input_price) + (completion_tokens / 1_000_000 * output_price)
+    return cost
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -39,6 +72,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Сбрасываем модель к дефолтной при старте
     if 'model' in context.user_data:
         del context.user_data['model']
+    # Сбрасываем max_tokens к дефолтному при старте
+    if 'max_tokens' in context.user_data:
+        del context.user_data['max_tokens']
     
     await update.message.reply_text(
         "Привет! Я твой личный коуч 🤝\n\n"
@@ -62,16 +98,19 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "чтобы помочь тебе сформулировать её правильно!\n\n"
         "Команды:\n"
         "/start - начать работу с ботом\n"
-        "/help - показать эту справку\n"
+        "/help - показать эту справку\n\n"
         "/setprompt - установить новый системный промпт\n"
         "/getprompt - показать текущий системный промпт\n"
-        "/resetprompt - сбросить системный промпт к дефолтному\n"
+        "/resetprompt - сбросить системный промпт к дефолтному\n\n"
         "/settemp - установить температуру запроса (0.0-2.0)\n"
         "/gettemp - показать текущую температуру\n"
-        "/resettemp - сбросить температуру к дефолтной (0.2)\n"
+        "/resettemp - сбросить температуру к дефолтной (0.2)\n\n"
         "/setmodel - установить модель OpenAI (например: gpt-4o-mini, gpt-4o, gpt-3.5-turbo)\n"
         "/getmodel - показать текущую модель\n"
         "/resetmodel - сбросить модель к дефолтной (gpt-4o-mini)\n\n"
+        "/setmaxtokens - установить максимальное количество токенов (например: 2000)\n"
+        "/getmaxtokens - показать текущее максимальное количество токенов\n"
+        "/resetmaxtokens - сбросить к дефолтному значению (1000)\n\n"
         "Температура влияет на креативность ответов (диапазон: 0.0-2.0)"
     )
 
@@ -201,12 +240,25 @@ async def setmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     new_model = context.args[0].strip()
     
+    # Проверяем, меняется ли модель
+    old_model = context.user_data.get('model', DEFAULT_MODEL)
+    model_changed = old_model != new_model
+    
     # Сохраняем модель в user_data
     context.user_data['model'] = new_model
     
-    await update.message.reply_text(
-        f"✅ Модель установлена: {new_model}"
-    )
+    # Сбрасываем историю диалога при переключении модели
+    if model_changed:
+        context.user_data['conversation_history'] = []
+        logger.info(f"Пользователь {update.effective_user.id} переключил модель с {old_model} на {new_model}, история диалога очищена")
+        await update.message.reply_text(
+            f"✅ Модель установлена: {new_model}\n"
+            f"📝 История диалога очищена"
+        )
+    else:
+        await update.message.reply_text(
+            f"✅ Модель установлена: {new_model}"
+        )
     logger.info(f"Пользователь {update.effective_user.id} установил модель: {new_model}")
 
 
@@ -231,6 +283,65 @@ async def resetmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"✅ Модель сброшена к дефолтному значению: {DEFAULT_MODEL}"
     )
     logger.info(f"Пользователь {update.effective_user.id} сбросил модель к дефолтной")
+
+
+async def setmaxtokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /setmaxtokens для установки максимального количества токенов"""
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text(
+            "Использование: /setmaxtokens <количество>\n\n"
+            "Количество должно быть положительным числом.\n"
+            "Пример: /setmaxtokens 2000\n\n"
+            "Максимальное количество токенов определяет длину ответа модели."
+        )
+        return
+    
+    try:
+        new_max_tokens = int(context.args[0])
+        
+        # Проверяем, что значение положительное
+        if new_max_tokens <= 0:
+            await update.message.reply_text(
+                "❌ Количество токенов должно быть положительным числом."
+            )
+            return
+        
+        # Сохраняем max_tokens в user_data
+        context.user_data['max_tokens'] = new_max_tokens
+        
+        await update.message.reply_text(
+            f"✅ Максимальное количество токенов установлено: {new_max_tokens}"
+        )
+        logger.info(f"Пользователь {update.effective_user.id} установил max_tokens: {new_max_tokens}")
+        
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Ошибка: количество токенов должно быть числом.\n"
+            "Пример: /setmaxtokens 2000"
+        )
+
+
+async def getmaxtokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /getmaxtokens для просмотра текущего максимального количества токенов"""
+    # Получаем текущее значение или используем дефолтное
+    current_max_tokens = context.user_data.get('max_tokens', MAX_TOKENS)
+    is_default = 'max_tokens' not in context.user_data
+    
+    max_tokens_text = f"Текущее максимальное количество токенов: {current_max_tokens}{' (дефолтное)' if is_default else ''}"
+    
+    await update.message.reply_text(max_tokens_text)
+
+
+async def resetmaxtokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /resetmaxtokens для сброса максимального количества токенов к дефолтному"""
+    # Удаляем кастомное значение
+    if 'max_tokens' in context.user_data:
+        del context.user_data['max_tokens']
+    
+    await update.message.reply_text(
+        f"✅ Максимальное количество токенов сброшено к дефолтному значению: {MAX_TOKENS}"
+    )
+    logger.info(f"Пользователь {update.effective_user.id} сбросил max_tokens к дефолтному")
 
 def is_goal_formulated(answer: str) -> bool:
     """Проверяет, сформулировал ли бот финальную цель по наличию специального маркера"""
@@ -299,7 +410,16 @@ def convert_markdown_to_telegram(text: str) -> str:
     return text
 
 
-async def query_openai(question: str, conversation_history: list, system_prompt: str, temperature: float, model: str) -> tuple[str, list]:
+async def send_log_to_admin(bot, log_message: str):
+    """Отправляет лог админу в Telegram"""
+    if ADMIN_USER_ID:
+        try:
+            await bot.send_message(chat_id=int(ADMIN_USER_ID), text=log_message)
+        except Exception as e:
+            logger.error(f"Ошибка при отправке лога админу: {e}")
+
+
+async def query_openai(question: str, conversation_history: list, system_prompt: str, temperature: float, model: str, max_tokens: int, bot=None) -> tuple[str, list]:
     """Отправляет запрос в OpenAI API и возвращает ответ и обновленную историю"""
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
@@ -323,18 +443,25 @@ async def query_openai(question: str, conversation_history: list, system_prompt:
         "content": question
     })
     
+    # Для моделей GPT-5 используется max_completion_tokens вместо max_tokens
+    # Для GPT-5 не поддерживается параметр temperature
     payload = {
         "model": model,
-        "messages": messages,
-        "temperature": temperature,
-        "max_tokens": 1000
+        "messages": messages
     }
+    
+    if model.startswith("gpt-5"):
+        payload["max_completion_tokens"] = max_tokens
+        # GPT-5 не поддерживает параметр temperature
+    else:
+        payload["max_tokens"] = max_tokens
+        payload["temperature"] = temperature
     
     try:
         # Засекаем время начала запроса
         start_time = time.time()
         
-        response = requests.post(OPENAI_API_URL, json=payload, headers=headers, timeout=30)
+        response = requests.post(OPENAI_API_URL, json=payload, headers=headers, timeout=API_TIMEOUT)
         response.raise_for_status()
         
         # Засекаем время окончания запроса
@@ -345,29 +472,63 @@ async def query_openai(question: str, conversation_history: list, system_prompt:
         
         # Извлекаем ответ из структуры ответа OpenAI
         if 'choices' in data and len(data['choices']) > 0:
-            answer = data['choices'][0]['message']['content']
+            choice = data['choices'][0]
+            answer = choice.get('message', {}).get('content', '')
+            finish_reason = choice.get('finish_reason', '')
+            
+            # Для GPT-5 проверяем, если content пустой из-за лимита токенов
+            if model.startswith("gpt-5") and not answer and finish_reason == "length":
+                usage = data.get('usage', {})
+                completion_tokens = usage.get('completion_tokens', 0)
+                completion_details = usage.get('completion_tokens_details', {})
+                reasoning_tokens = completion_details.get('reasoning_tokens', 0)
+                
+                answer = (
+                    f"⚠️ Достигнут лимит токенов. Все {completion_tokens} токенов ушли на рассуждения (reasoning tokens: {reasoning_tokens}). "
+                    f"Модель не успела сгенерировать финальный ответ.\n\n"
+                    f"Рекомендуется увеличить max_tokens (текущее значение: {max_tokens}) для получения полного ответа."
+                )
+                
+                logger.warning(
+                    f"GPT-5 вернул пустой content. Finish reason: {finish_reason}, "
+                    f"Reasoning tokens: {reasoning_tokens}/{completion_tokens}"
+                )
+            
+            # Если ответ все еще пустой, возвращаем сообщение об ошибке
+            if not answer:
+                answer = "Извините, не удалось получить ответ от модели."
             
             # Извлекаем информацию из ответа API
             usage = data.get('usage', {})
+            prompt_tokens = usage.get('prompt_tokens', 0)
+            completion_tokens = usage.get('completion_tokens', 0)
             total_tokens = usage.get('total_tokens', 0)
-            total_cost = usage.get('total_cost')  # Если есть в ответе API
             
-            # Логируем информацию о запросе (данные из JSON ответа)
+            # Проверяем наличие reasoning tokens
+            completion_details = usage.get('completion_tokens_details', {})
+            reasoning_tokens = completion_details.get('reasoning_tokens', 0)
+            
+            # Рассчитываем стоимость
+            total_cost = calculate_cost(model, prompt_tokens, completion_tokens)
+            
+            # Логируем информацию о запросе
             log_message = (
                 f"OpenAI API запрос - Модель: {model}, "
                 f"Время ответа: {response_time:.3f}с, "
-                f"Total tokens: {total_tokens}"
+                f"Prompt tokens: {prompt_tokens}, Completion tokens: {completion_tokens}"
             )
             
-            if total_cost is not None:
-                log_message += f", Total cost: {total_cost}"
+            # Добавляем reasoning tokens, если они есть
+            if reasoning_tokens > 0:
+                log_message += f", Reasoning tokens: {reasoning_tokens}"
             
-            # Добавляем все остальные поля из usage, если они есть
-            other_fields = {k: v for k, v in usage.items() if k not in ['total_tokens', 'total_cost']}
-            if other_fields:
-                log_message += f", Usage: {other_fields}"
+            log_message += f", Total cost: ${total_cost:.6f}"
             
             logger.info(log_message)
+            
+            # Отправляем лог админу
+            if bot:
+                await send_log_to_admin(bot, log_message)
             
             # Обновляем историю: добавляем вопрос пользователя и ответ бота
             updated_history = conversation_history.copy()
@@ -430,10 +591,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         temperature = context.user_data.get('temperature', DEFAULT_TEMPERATURE)
         # Получаем модель из user_data или используем дефолтную
         model = context.user_data.get('model', DEFAULT_MODEL)
+        # Получаем max_tokens из user_data или используем дефолтное
+        max_tokens = context.user_data.get('max_tokens', MAX_TOKENS)
         
         # Получаем ответ от OpenAI с историей диалога
-        answer, updated_history = await query_openai(user_message, conversation_history, system_prompt, temperature, model)
+        answer, updated_history = await query_openai(user_message, conversation_history, system_prompt, temperature, model, max_tokens, context.bot)
         
+        # Удаляем сообщение "Думаю..."
+        await thinking_message.delete()
+        
+        # Обрабатываем ответ для всех моделей
         # Проверяем, сформулировал ли бот финальную цель
         goal_formulated = is_goal_formulated(answer)
         
@@ -450,11 +617,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Удаляем номера источников из ответа
         answer = remove_source_numbers(answer)
         
-        # Удаляем сообщение "Думаю..."
-        await thinking_message.delete()
-        
         # Преобразуем markdown в форматирование Telegram
         formatted_answer = convert_markdown_to_telegram(answer)
+        
+        # Проверяем, что ответ не пустой
+        if not formatted_answer or not formatted_answer.strip():
+            await update.message.reply_text(
+                "Извините, не удалось получить ответ от модели. Попробуйте еще раз."
+            )
+            logger.warning(f"Получен пустой ответ от модели {model}")
+            return
         
         # Отправляем ответ пользователю с HTML форматированием
         # Разбиваем длинные ответы на части (Telegram имеет лимит 4096 символов)
@@ -492,6 +664,9 @@ def main():
     application.add_handler(CommandHandler("setmodel", setmodel_command))
     application.add_handler(CommandHandler("getmodel", getmodel_command))
     application.add_handler(CommandHandler("resetmodel", resetmodel_command))
+    application.add_handler(CommandHandler("setmaxtokens", setmaxtokens_command))
+    application.add_handler(CommandHandler("getmaxtokens", getmaxtokens_command))
+    application.add_handler(CommandHandler("resetmaxtokens", resetmaxtokens_command))
     
     # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
