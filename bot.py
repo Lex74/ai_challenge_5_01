@@ -33,6 +33,9 @@ MEMORY_DIR = "memory"
 # Количество сообщений перед саммаризацией
 MESSAGES_BEFORE_SUMMARY = 10
 
+# Максимальное количество сообщений в recent_messages перед принудительной очисткой
+MAX_RECENT_MESSAGES = 30
+
 # Таймаут для запросов к OpenAI API (в секундах)
 API_TIMEOUT = 300  # 5 минут
 
@@ -365,8 +368,13 @@ async def setmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Сбрасываем историю диалога при переключении модели
     if model_changed:
+        user_id = update.effective_user.id
+        # Очищаем память на диске при переключении модели
+        memory_path = get_memory_file_path(user_id)
+        if os.path.exists(memory_path):
+            os.remove(memory_path)
         context.user_data['conversation_history'] = []
-        logger.info(f"Пользователь {update.effective_user.id} переключил модель с {old_model} на {new_model}, история диалога очищена")
+        logger.info(f"Пользователь {user_id} переключил модель с {old_model} на {new_model}, история диалога и память очищены")
         await update.message.reply_text(
             f"✅ Модель установлена: {new_model}\n"
             f"📝 История диалога очищена"
@@ -391,14 +399,23 @@ async def getmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def resetmodel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /resetmodel для сброса модели к дефолтной"""
+    user_id = update.effective_user.id
+    old_model = context.user_data.get('model', DEFAULT_MODEL)
+    
     # Удаляем кастомную модель
     if 'model' in context.user_data:
         del context.user_data['model']
+        # Очищаем память на диске при сбросе модели (если модель менялась)
+        if old_model != DEFAULT_MODEL:
+            memory_path = get_memory_file_path(user_id)
+            if os.path.exists(memory_path):
+                os.remove(memory_path)
+            logger.info(f"Пользователь {user_id} сбросил модель с {old_model} на {DEFAULT_MODEL}, память очищена")
     
     await update.message.reply_text(
         f"✅ Модель сброшена к дефолтному значению: {DEFAULT_MODEL}"
     )
-    logger.info(f"Пользователь {update.effective_user.id} сбросил модель к дефолтной")
+    logger.info(f"Пользователь {user_id} сбросил модель к дефолтной")
 
 
 async def setmaxtokens_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -763,22 +780,40 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 # Создаем саммари всей истории
                 new_summary = await summarize_conversation(history_to_summarize, model, context.bot)
                 
-                # Объединяем новый саммари со старым (накопление)
-                if summary and new_summary:
-                    combined_summary = f"{summary}\n\n{new_summary}"
-                elif new_summary:
-                    combined_summary = new_summary
+                # Очищаем recent_messages и сбрасываем счетчик только если саммаризация успешна
+                if new_summary and new_summary.strip():
+                    # Объединяем новый саммари со старым (накопление)
+                    if summary:
+                        combined_summary = f"{summary}\n\n{new_summary}"
+                    else:
+                        combined_summary = new_summary
+                    
+                    # Обновляем память только при успешной саммаризации
+                    summary = combined_summary
+                    recent_messages = []
+                    message_count = 0
+                    
+                    logger.info(f"Выполнена саммаризация для пользователя {user_id}")
                 else:
-                    combined_summary = summary
-                
-                # Обновляем память
-                summary = combined_summary
-                recent_messages = []
-                message_count = 0
-                
-                logger.info(f"Выполнена саммаризация для пользователя {user_id}")
+                    # Если саммаризация не удалась, сохраняем сообщения и продолжаем накапливать
+                    logger.warning(f"Саммаризация не удалась для пользователя {user_id}, сообщения сохранены")
+                    
+                    # Защита от неограниченного роста: если recent_messages слишком большой,
+                    # принудительно очищаем старые сообщения, оставляя только последние
+                    if len(recent_messages) > MAX_RECENT_MESSAGES:
+                        # Оставляем только последние MAX_RECENT_MESSAGES сообщений
+                        recent_messages = recent_messages[-MAX_RECENT_MESSAGES:]
+                        logger.warning(
+                            f"Превышен лимит recent_messages для пользователя {user_id}. "
+                            f"Оставлены только последние {MAX_RECENT_MESSAGES} сообщений."
+                        )
+                    
+                    # Сбрасываем message_count на 0, чтобы не пытаться саммаризировать при каждом сообщении
+                    # Будем пытаться снова, когда накопится еще MESSAGES_BEFORE_SUMMARY сообщений
+                    message_count = 0
             
-            # Сохраняем память на диск
+            # Сохраняем память на диск сразу после обработки сообщений и саммаризации
+            # Это гарантирует сохранение даже если произойдет ошибка при форматировании или отправке
             memory_data = {
                 "summary": summary,
                 "recent_messages": recent_messages,
@@ -813,6 +848,32 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")
         await thinking_message.delete()
+        
+        # Сохраняем память даже при ошибке, если сообщения были добавлены
+        # Это защита от потери данных при ошибках форматирования или отправки
+        try:
+            # Проверяем, были ли добавлены новые сообщения до ошибки
+            # Если goal_formulated был False, значит сообщения должны были быть добавлены
+            # Загружаем текущее состояние и проверяем, нужно ли сохранить
+            current_memory = load_memory_from_disk(user_id)
+            current_recent_messages = current_memory.get("recent_messages", [])
+            current_message_count = current_memory.get("message_count", 0)
+            
+            # Если в локальных переменных есть recent_messages с новыми сообщениями,
+            # и они отличаются от сохраненных, значит нужно сохранить
+            if 'recent_messages' in locals() and 'message_count' in locals():
+                # Проверяем, были ли добавлены новые сообщения (сравниваем длины)
+                if len(recent_messages) > len(current_recent_messages) or message_count > current_message_count:
+                    memory_data = {
+                        "summary": summary if 'summary' in locals() else current_memory.get("summary", ""),
+                        "recent_messages": recent_messages,
+                        "message_count": message_count
+                    }
+                    save_memory_to_disk(user_id, memory_data)
+                    logger.info(f"Сохранена память после ошибки для пользователя {user_id}")
+        except Exception as save_error:
+            logger.error(f"Ошибка при сохранении памяти после исключения: {save_error}")
+        
         await update.message.reply_text(
             "Извините, произошла ошибка при обработке вашего запроса. "
             "Попробуйте еще раз позже."
