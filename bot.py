@@ -2,6 +2,8 @@ import logging
 import requests
 import re
 import time
+import json
+import os
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from config import TELEGRAM_BOT_TOKEN, OPENAI_API_KEY, OPENAI_API_URL, ADMIN_USER_ID
@@ -25,6 +27,12 @@ DEFAULT_MODEL = "gpt-4o-mini"
 # Максимальное количество токенов для ответа
 MAX_TOKENS = 1000
 
+# Папка для хранения файлов памяти
+MEMORY_DIR = "memory"
+
+# Количество сообщений перед саммаризацией
+MESSAGES_BEFORE_SUMMARY = 10
+
 # Таймаут для запросов к OpenAI API (в секундах)
 API_TIMEOUT = 300  # 5 минут
 
@@ -45,6 +53,106 @@ MODEL_PRICING = {
 }
 
 
+def ensure_memory_dir():
+    """Создает папку memory/ если её нет"""
+    if not os.path.exists(MEMORY_DIR):
+        os.makedirs(MEMORY_DIR)
+        logger.info(f"Создана папка {MEMORY_DIR}/")
+
+
+def get_memory_file_path(user_id: int) -> str:
+    """Возвращает путь к файлу памяти пользователя"""
+    return os.path.join(MEMORY_DIR, f"user_{user_id}.json")
+
+
+def load_memory_from_disk(user_id: int) -> dict:
+    """Загружает память с диска (возвращает структуру с summary, recent_messages, message_count)"""
+    memory_path = get_memory_file_path(user_id)
+    
+    if os.path.exists(memory_path):
+        try:
+            with open(memory_path, 'r', encoding='utf-8') as f:
+                memory_data = json.load(f)
+                logger.info(f"Загружена память для пользователя {user_id}")
+                return memory_data
+        except Exception as e:
+            logger.error(f"Ошибка при загрузке памяти для пользователя {user_id}: {e}")
+            return {"summary": "", "recent_messages": [], "message_count": 0}
+    else:
+        return {"summary": "", "recent_messages": [], "message_count": 0}
+
+
+def save_memory_to_disk(user_id: int, memory_data: dict):
+    """Сохраняет память на диск"""
+    ensure_memory_dir()
+    memory_path = get_memory_file_path(user_id)
+    
+    try:
+        with open(memory_path, 'w', encoding='utf-8') as f:
+            json.dump(memory_data, f, ensure_ascii=False, indent=2)
+        logger.info(f"Сохранена память для пользователя {user_id}")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении памяти для пользователя {user_id}: {e}")
+
+
+async def summarize_conversation(conversation_history: list, model: str, bot=None) -> str:
+    """Отправляет запрос к OpenAI API для саммаризации истории диалога, возвращает саммари"""
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    # Формируем список сообщений для саммаризации
+    messages = [
+        {
+            "role": "system",
+            "content": "Ты помощник, который создает краткое саммари диалога. Создай краткое саммари основных моментов разговора, сохраняя важные детали и контекст для продолжения диалога."
+        }
+    ]
+    
+    # Добавляем историю диалога для саммаризации
+    messages.extend(conversation_history)
+    
+    # Добавляем инструкцию для создания саммари
+    messages.append({
+        "role": "user",
+        "content": "Создай краткое саммари этого диалога, сохраняя важные детали и контекст."
+    })
+    
+    payload = {
+        "model": model,
+        "messages": messages
+    }
+    
+    if model.startswith("gpt-5"):
+        payload["max_completion_tokens"] = 500  # Для саммари используем меньше токенов
+    else:
+        payload["max_tokens"] = 500
+        payload["temperature"] = 0.3  # Немного выше для саммари
+    
+    try:
+        response = requests.post(OPENAI_API_URL, json=payload, headers=headers, timeout=API_TIMEOUT)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if 'choices' in data and len(data['choices']) > 0:
+            summary = data['choices'][0].get('message', {}).get('content', '')
+            if summary:
+                logger.info(f"Создано саммари для диалога (модель: {model})")
+                return summary
+            else:
+                logger.warning("Получено пустое саммари от API")
+                return ""
+        else:
+            logger.error("Не удалось получить саммари от API")
+            return ""
+            
+    except Exception as e:
+        logger.error(f"Ошибка при создании саммари: {e}")
+        return ""
+
+
 def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
     """Рассчитывает стоимость запроса на основе модели и количества токенов"""
     if model not in MODEL_PRICING:
@@ -61,6 +169,14 @@ def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> fl
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
+    user_id = update.effective_user.id
+    
+    # Очищаем память на диске при старте
+    memory_path = get_memory_file_path(user_id)
+    if os.path.exists(memory_path):
+        os.remove(memory_path)
+        logger.info(f"Очищена память для пользователя {user_id} при /start")
+    
     # Очищаем историю диалога при старте
     context.user_data['conversation_history'] = []
     # Сбрасываем промпт к дефолтному при старте
@@ -535,11 +651,6 @@ async def query_openai(question: str, conversation_history: list, system_prompt:
             updated_history.append({"role": "user", "content": question})
             updated_history.append({"role": "assistant", "content": answer})
             
-            # Ограничиваем историю последними 10 сообщениями (5 пар вопрос-ответ)
-            # чтобы не превышать лимиты токенов
-            if len(updated_history) > 10:
-                updated_history = updated_history[-10:]
-            
             return answer, updated_history
         else:
             return "Извините, не удалось получить ответ от API.", conversation_history
@@ -565,18 +676,21 @@ async def query_openai(question: str, conversation_history: list, system_prompt:
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик текстовых сообщений"""
     user_message = update.message.text
+    user_id = update.effective_user.id
     
-    # Получаем или создаем историю диалога для пользователя
-    if 'conversation_history' not in context.user_data:
-        context.user_data['conversation_history'] = []
-    
-    conversation_history = context.user_data['conversation_history']
+    # Загружаем память с диска (если есть)
+    memory_data = load_memory_from_disk(user_id)
+    summary = memory_data.get("summary", "")
+    recent_messages = memory_data.get("recent_messages", [])
+    message_count = memory_data.get("message_count", 0)
     
     # Проверяем, хочет ли пользователь начать заново
     user_message_lower = user_message.lower().strip()
     if user_message_lower in ['стоп', 'стой']:
-        # Очищаем историю диалога
-        context.user_data['conversation_history'] = []
+        # Очищаем память на диске
+        memory_path = get_memory_file_path(user_id)
+        if os.path.exists(memory_path):
+            os.remove(memory_path)
         logger.info("Пользователь запросил сброс истории диалога")
         await update.message.reply_text("Хорошо, тогда начнём с начала! 🎯")
         return
@@ -594,8 +708,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем max_tokens из user_data или используем дефолтное
         max_tokens = context.user_data.get('max_tokens', MAX_TOKENS)
         
-        # Получаем ответ от OpenAI с историей диалога
-        answer, updated_history = await query_openai(user_message, conversation_history, system_prompt, temperature, model, max_tokens, context.bot)
+        # Формируем полную историю: summary (если есть) + recent_messages
+        # Если есть summary, объединяем его с системным промптом
+        full_system_prompt = system_prompt
+        if summary:
+            full_system_prompt = f"{system_prompt}\n\nКонтекст предыдущих диалогов:\n{summary}"
+        
+        full_conversation_history = recent_messages.copy()
+        
+        # Получаем ответ от OpenAI с полной историей диалога
+        answer, updated_history = await query_openai(user_message, full_conversation_history, full_system_prompt, temperature, model, max_tokens, context.bot)
         
         # Удаляем сообщение "Думаю..."
         await thinking_message.delete()
@@ -605,14 +727,64 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         goal_formulated = is_goal_formulated(answer)
         
         if goal_formulated:
-            # Очищаем историю диалога после формулировки цели
-            context.user_data['conversation_history'] = []
-            logger.info("Цель сформулирована, история диалога очищена")
+            # Очищаем память на диске после формулировки цели
+            memory_path = get_memory_file_path(user_id)
+            if os.path.exists(memory_path):
+                os.remove(memory_path)
+            logger.info("Цель сформулирована, память очищена")
             # Удаляем маркер из ответа перед отправкой пользователю
             answer = remove_marker_from_answer(answer)
         else:
-            # Сохраняем обновленную историю
-            context.user_data['conversation_history'] = updated_history
+            # Добавляем новое сообщение в recent_messages
+            recent_messages.append({"role": "user", "content": user_message})
+            recent_messages.append({"role": "assistant", "content": answer})
+            
+            # Увеличиваем счетчик сообщений
+            message_count += 1
+            
+            # Если достигли порога саммаризации
+            if message_count >= MESSAGES_BEFORE_SUMMARY:
+                # Саммаризируем текущую историю (summary + recent_messages)
+                # Формируем полную историю для саммаризации
+                history_to_summarize = []
+                if summary:
+                    # Добавляем старый summary как контекст
+                    history_to_summarize.append({
+                        "role": "user",
+                        "content": f"Контекст предыдущих диалогов: {summary}"
+                    })
+                    history_to_summarize.append({
+                        "role": "assistant",
+                        "content": "Понял, продолжаю диалог с учетом этого контекста."
+                    })
+                # Добавляем недавние сообщения
+                history_to_summarize.extend(recent_messages)
+                
+                # Создаем саммари всей истории
+                new_summary = await summarize_conversation(history_to_summarize, model, context.bot)
+                
+                # Объединяем новый саммари со старым (накопление)
+                if summary and new_summary:
+                    combined_summary = f"{summary}\n\n{new_summary}"
+                elif new_summary:
+                    combined_summary = new_summary
+                else:
+                    combined_summary = summary
+                
+                # Обновляем память
+                summary = combined_summary
+                recent_messages = []
+                message_count = 0
+                
+                logger.info(f"Выполнена саммаризация для пользователя {user_id}")
+            
+            # Сохраняем память на диск
+            memory_data = {
+                "summary": summary,
+                "recent_messages": recent_messages,
+                "message_count": message_count
+            }
+            save_memory_to_disk(user_id, memory_data)
         
         # Удаляем номера источников из ответа
         answer = remove_source_numbers(answer)
