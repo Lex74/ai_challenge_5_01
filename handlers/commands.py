@@ -73,6 +73,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setmaxtokens - установить максимальное количество токенов (например: 2000)\n"
         "/getmaxtokens - показать текущее максимальное количество токенов\n"
         "/resetmaxtokens - сбросить к дефолтному значению (1000)\n\n"
+        "/notion_tools - показать список доступных инструментов Notion\n\n"
         "Температура влияет на креативность ответов (диапазон: 0.0-2.0)"
     )
 
@@ -314,3 +315,157 @@ async def resetmaxtokens_command(update: Update, context: ContextTypes.DEFAULT_T
         f"✅ Максимальное количество токенов сброшено к дефолтному значению: {MAX_TOKENS}"
     )
     logger.info(f"Пользователь {update.effective_user.id} сбросил max_tokens к дефолтному")
+
+
+async def notion_tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /notion_tools для вывода списка доступных инструментов Notion"""
+    await update.message.reply_text("🔍 Получаю список инструментов Notion...")
+    
+    try:
+        from mcp_client import list_notion_tools, get_last_error
+        
+        tools = await list_notion_tools()
+        
+        if not tools:
+            # Получаем детальную информацию об ошибке
+            error_info = get_last_error()
+            if error_info:
+                error_type, error_msg = error_info
+                if error_type == "NODE_VERSION_ERROR":
+                    await update.message.reply_text(
+                        f"❌ {error_msg}\n\n"
+                        f"💡 После обновления Node.js перезапустите бота."
+                    )
+                elif error_type == "COMMAND_NOT_FOUND":
+                    await update.message.reply_text(
+                        f"❌ {error_msg}\n\n"
+                        f"💡 Совет: После установки Node.js перезапустите бота."
+                    )
+                elif error_type == "FILE_NOT_FOUND":
+                    await update.message.reply_text(
+                        f"❌ {error_msg}\n\n"
+                        f"💡 Убедитесь, что Node.js версии 18+ установлен и команда 'npx' доступна."
+                    )
+                elif error_type == "PERMISSION_ERROR":
+                    await update.message.reply_text(
+                        f"❌ {error_msg}"
+                    )
+                elif error_type == "IMPORT_ERROR":
+                    await update.message.reply_text(
+                        f"❌ {error_msg}"
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"❌ Ошибка: {error_msg}\n\n"
+                        f"Проверьте логи для получения дополнительной информации."
+                    )
+            else:
+                await update.message.reply_text(
+                    "❌ Не удалось получить список инструментов Notion.\n\n"
+                    "Возможные причины:\n"
+                    "• MCP сервер Notion не установлен или не настроен\n"
+                    "• Команда MCP_NOTION_COMMAND неверна в .env файле\n"
+                    "• Ошибка подключения к MCP серверу\n\n"
+                    "Проверьте логи для получения дополнительной информации."
+                )
+            return
+        
+        # Формируем сообщение со списком инструментов
+        message_parts = ["📋 Доступные инструменты Notion:\n"]
+        
+        for i, tool in enumerate(tools, 1):
+            # tool уже должен быть словарем после преобразования в mcp_client
+            if isinstance(tool, dict):
+                name = tool.get('name', 'Неизвестно')
+                description = tool.get('description', 'Нет описания')
+                
+                # Получаем параметры инструмента
+                input_schema = tool.get('inputSchema', {}) or tool.get('input_schema', {})
+                if isinstance(input_schema, dict):
+                    properties = input_schema.get('properties', {})
+                else:
+                    properties = {}
+            else:
+                # Fallback на случай, если объект не преобразован
+                name = getattr(tool, 'name', 'Неизвестно')
+                description = getattr(tool, 'description', 'Нет описания')
+                input_schema = getattr(tool, 'inputSchema', None) or getattr(tool, 'input_schema', None)
+                if input_schema and hasattr(input_schema, 'get'):
+                    properties = input_schema.get('properties', {}) if isinstance(input_schema, dict) else {}
+                else:
+                    properties = {}
+            
+            # Очищаем и экранируем HTML-символы в тексте
+            import re
+            from html import escape
+            
+            def clean_html_text(text: str) -> str:
+                """Удаляет недопустимые HTML-теги и экранирует специальные символы"""
+                if not text:
+                    return ""
+                # Удаляем недопустимые HTML-теги (например, <data-source>)
+                text = re.sub(r'<[^>]+>', '', str(text))
+                # Экранируем оставшиеся HTML-символы
+                text = escape(text)
+                return text
+            
+            name_cleaned = clean_html_text(name)
+            
+            tool_info = f"\n{i}. <b>{name_cleaned}</b>\n"
+            
+            if properties:
+                tool_info += "   Параметры:\n"
+                for param_name, param_info in properties.items():
+                    param_type = param_info.get('type', 'unknown') if isinstance(param_info, dict) else 'unknown'
+                    # Очищаем HTML в названии и типе параметра
+                    param_name_cleaned = clean_html_text(param_name)
+                    param_type_cleaned = clean_html_text(param_type)
+                    tool_info += f"   • {param_name_cleaned} ({param_type_cleaned})\n"
+            
+            message_parts.append(tool_info)
+        
+        full_message = "".join(message_parts)
+        
+        # Telegram имеет лимит 4096 символов на сообщение
+        if len(full_message) > 4000:
+            # Разбиваем на части
+            current_part = ""
+            for part in message_parts:
+                if len(current_part) + len(part) > 4000:
+                    await update.message.reply_text(current_part, parse_mode='HTML')
+                    current_part = part
+                else:
+                    current_part += part
+            if current_part:
+                await update.message.reply_text(current_part, parse_mode='HTML')
+        else:
+            await update.message.reply_text(full_message, parse_mode='HTML')
+        
+        logger.info(f"Пользователь {update.effective_user.id} запросил список инструментов Notion, получено {len(tools)} инструментов")
+        
+    except ImportError as e:
+        error_msg = str(e)
+        if 'mcp' in error_msg:
+            logger.error(f"Ошибка импорта mcp: {e}")
+            await update.message.reply_text(
+                "❌ Библиотека mcp не установлена.\n\n"
+                "Для установки выполните:\n"
+                "```\n"
+                "pip install mcp\n"
+                "```\n\n"
+                "Или установите все зависимости:\n"
+                "```\n"
+                "pip install -r requirements.txt\n"
+                "```"
+            )
+        else:
+            logger.error(f"Ошибка импорта mcp_client: {e}")
+            await update.message.reply_text(
+                f"❌ Ошибка импорта: {e}\n\n"
+                "Установите зависимости: pip install -r requirements.txt"
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при выполнении команды /notion_tools: {e}")
+        await update.message.reply_text(
+            f"❌ Произошла ошибка при получении списка инструментов:\n{str(e)}"
+        )

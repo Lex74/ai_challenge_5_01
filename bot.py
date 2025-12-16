@@ -20,6 +20,7 @@ from handlers.commands import (
     setmaxtokens_command,
     getmaxtokens_command,
     resetmaxtokens_command,
+    notion_tools_command,
 )
 from handlers.messages import handle_message
 
@@ -51,6 +52,7 @@ def main():
     application.add_handler(CommandHandler("setmaxtokens", setmaxtokens_command))
     application.add_handler(CommandHandler("getmaxtokens", getmaxtokens_command))
     application.add_handler(CommandHandler("resetmaxtokens", resetmaxtokens_command))
+    application.add_handler(CommandHandler("notion_tools", notion_tools_command))
     
     # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
