@@ -4,10 +4,10 @@ import shutil
 import subprocess
 from typing import List, Dict, Any, Optional, Tuple
 
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import StdioServerParameters
 
 from config import MCP_NOTION_COMMAND, MCP_NOTION_ARGS
+from mcp_base import BaseMCPClient
 
 logger = logging.getLogger(__name__)
 
@@ -90,19 +90,17 @@ def _check_command_available(command: str) -> Tuple[bool, Optional[str]]:
 
 def _get_server_params() -> Tuple[Optional[StdioServerParameters], Optional[str]]:
     """Создает параметры сервера MCP и проверяет доступность команды"""
-    global _last_error
-    
     # Проверяем версию Node.js (требуется >= 18)
     if MCP_NOTION_COMMAND.split()[0] == "npx":
         version_ok, version_error = _check_node_version()
         if not version_ok:
-            _last_error = ("NODE_VERSION_ERROR", version_error or "Неверная версия Node.js")
+            _set_last_error("NODE_VERSION_ERROR", version_error or "Неверная версия Node.js")
             return None, version_error
     
     # Проверяем доступность команды
     is_available, error_msg = _check_command_available(MCP_NOTION_COMMAND)
     if not is_available:
-        _last_error = ("COMMAND_NOT_FOUND", error_msg or "Команда не найдена")
+        _set_last_error("COMMAND_NOT_FOUND", error_msg or "Команда не найдена")
         return None, error_msg
     
     try:
@@ -114,11 +112,11 @@ def _get_server_params() -> Tuple[Optional[StdioServerParameters], Optional[str]
             command=command,
             args=args
         )
-        _last_error = None
+        _set_last_error(None, None)
         return server_params, None
     except Exception as e:
         error_msg = f"Ошибка при создании параметров сервера: {e}"
-        _last_error = ("CONFIG_ERROR", error_msg)
+        _set_last_error("CONFIG_ERROR", error_msg)
         return None, error_msg
 
 
@@ -127,64 +125,28 @@ def get_last_error() -> Optional[Tuple[str, str]]:
     return _last_error
 
 
+def _set_last_error(error_type: Optional[str], error_msg: Optional[str]) -> None:
+    """Устанавливает последнюю ошибку"""
+    global _last_error
+    _last_error = (error_type, error_msg) if error_type and error_msg else None
+
+
+# Создаем экземпляр клиента
+_notion_client = BaseMCPClient(
+    server_name="Notion",
+    get_server_params_func=_get_server_params,
+    get_last_error_func=get_last_error,
+    set_last_error_func=_set_last_error,
+    init_timeout=20,
+    tools_timeout=20,
+    call_timeout=40,
+)
+
+
 async def list_notion_tools() -> List[Dict[str, Any]]:
     """Получает список доступных инструментов Notion через MCP сервер"""
-    global _last_error
-    
     try:
-        server_params, error_msg = _get_server_params()
-        if server_params is None:
-            logger.error(f"Не удалось создать параметры сервера: {error_msg}")
-            return []
-        
-        # Подключаемся к MCP серверу и получаем список инструментов
-        async with stdio_client(server_params) as (read, write):
-            async with ClientSession(read, write) as session:
-                # Инициализируем сессию
-                await session.initialize()
-                logger.info("MCP сервер Notion успешно подключен")
-                
-                # Получаем список инструментов из MCP сервера
-                tools_result = await session.list_tools()
-                tools_objects = tools_result.tools if tools_result else []
-                
-                # Преобразуем объекты Tool в словари
-                tools = []
-                for tool_obj in tools_objects:
-                    # Пробуем разные способы преобразования в зависимости от версии библиотеки
-                    if hasattr(tool_obj, 'model_dump'):
-                        # Pydantic v2
-                        tool_dict = tool_obj.model_dump()
-                    elif hasattr(tool_obj, 'dict'):
-                        # Pydantic v1
-                        tool_dict = tool_obj.dict()
-                    elif hasattr(tool_obj, '__dict__'):
-                        # Обычный объект
-                        tool_dict = tool_obj.__dict__
-                    else:
-                        # Пробуем получить атрибуты напрямую
-                        tool_dict = {
-                            'name': getattr(tool_obj, 'name', 'Неизвестно')
-                        }
-                    tools.append(tool_dict)
-                
-                logger.info(f"Получено {len(tools)} инструментов от MCP сервера Notion")
-                _last_error = None
-                return tools
-                
-    except FileNotFoundError as e:
-        error_msg = (
-            f"MCP команда не найдена: {e}\n\n"
-            f"Команда: '{MCP_NOTION_COMMAND}'\n\n"
-            f"Убедитесь, что:\n"
-            f"• Node.js версии 18+ установлен (команда 'npx' должна быть доступна)\n"
-            f"• Команда указана правильно в переменной окружения MCP_NOTION_COMMAND\n"
-            f"• MCP сервер Notion доступен через: npx -y mcp-remote https://mcp.notion.com/mcp\n\n"
-            f"Документация: https://developers.notion.com/docs/get-started-with-mcp"
-        )
-        _last_error = ("FILE_NOT_FOUND", error_msg)
-        logger.error(error_msg)
-        return []
+        return await _notion_client.list_tools()
     except PermissionError as e:
         error_msg = (
             f"Ошибка прав доступа при выполнении MCP команды: {e}\n\n"
@@ -194,27 +156,22 @@ async def list_notion_tools() -> List[Dict[str, Any]]:
             f"• Переустановите mcp-remote: npx clear-npx-cache\n"
             f"• Проверьте права доступа к директории npm"
         )
-        _last_error = ("PERMISSION_ERROR", error_msg)
+        _set_last_error("PERMISSION_ERROR", error_msg)
         logger.error(error_msg)
         return []
-    except ImportError as import_err:
+
+
+async def call_notion_tool(name: str, arguments: Dict[str, Any]) -> Optional[str]:
+    """Вызывает указанный инструмент Notion MCP и возвращает текстовый результат"""
+    try:
+        return await _notion_client.call_tool(name, arguments)
+    except PermissionError as e:
         error_msg = (
-            "Библиотека mcp не установлена.\n\n"
-            "Для установки выполните:\n"
-            "```bash\n"
-            "pip install mcp\n"
-            "```\n\n"
-            "Или установите все зависимости:\n"
-            "```bash\n"
-            "pip install -r requirements.txt\n"
-            "```\n\n"
-            f"Детали ошибки: {import_err}"
+            f"Ошибка прав доступа при выполнении MCP команды: {e}\n\n"
+            f"Возможные решения:\n"
+            f"• Убедитесь, что Node.js установлен правильно\n"
+            f"• Попробуйте очистить кэш npm: npm cache clean --force\n"
         )
-        _last_error = ("IMPORT_ERROR", error_msg)
-        logger.error(f"Библиотека mcp не установлена: {import_err}")
-        return []
-    except Exception as e:
-        error_msg = f"Ошибка при получении списка инструментов Notion: {e}"
-        _last_error = ("GENERAL_ERROR", error_msg)
-        logger.error(error_msg, exc_info=True)
-        return []
+        _set_last_error("PERMISSION_ERROR", error_msg)
+        logger.error(error_msg)
+        return None

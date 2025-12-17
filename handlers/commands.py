@@ -1,6 +1,7 @@
 """Обработчики команд бота"""
 import logging
 import json
+from typing import Optional, Tuple, List, Dict, Any
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
@@ -12,6 +13,7 @@ from constants import (
     MAX_TOKENS,
 )
 from memory import clear_memory
+from utils import format_tools_list, split_long_message
 
 logger = logging.getLogger(__name__)
 
@@ -75,9 +77,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/getmaxtokens - показать текущее максимальное количество токенов\n"
         "/resetmaxtokens - сбросить к дефолтному значению (1000)\n\n"
         "/notion_tools - показать список доступных инструментов Notion\n"
-        "/kinopoisk_tools - показать список доступных инструментов Kinopoisk MCP\n"
-        "/kp_search - поиск фильмов или подборок по названию и тематике "
-        "на Кинопоиске (результаты можно листать кнопкой «Следующая»)\n\n"
+        "/kinopoisk_tools - показать список доступных инструментов Kinopoisk MCP\n\n"
         "Температура влияет на креативность ответов (диапазон: 0.0-2.0)"
     )
 
@@ -321,8 +321,97 @@ async def resetmaxtokens_command(update: Update, context: ContextTypes.DEFAULT_T
     logger.info(f"Пользователь {update.effective_user.id} сбросил max_tokens к дефолтному")
 
 
+def _handle_tools_command_error(error_info: Optional[Tuple[str, str]], default_msg: str) -> str:
+    """Обрабатывает ошибки при получении списка инструментов"""
+    if not error_info:
+        return default_msg
+    
+    error_type, error_msg = error_info
+    
+    error_messages = {
+        "NODE_VERSION_ERROR": f"❌ {error_msg}\n\n💡 После обновления Node.js перезапустите бота.",
+        "COMMAND_NOT_FOUND": f"❌ {error_msg}\n\n💡 Совет: После установки Node.js перезапустите бота.",
+        "FILE_NOT_FOUND": f"❌ {error_msg}\n\n💡 Убедитесь, что Node.js версии 18+ установлен и команда 'npx' доступна.",
+        "PERMISSION_ERROR": f"❌ {error_msg}",
+        "IMPORT_ERROR": f"❌ {error_msg}",
+        "NO_API_KEY": f"❌ {error_msg}\n\nПроверьте настройки и переменную окружения KINOPOISK_API_KEY.",
+        "TIMEOUT_INIT": f"❌ {error_msg}\n\n💡 Команда прервана по тайм-ауту, чтобы бот не зависал.",
+        "TIMEOUT_TOOLS": f"❌ {error_msg}\n\n💡 Команда прервана по тайм-ауту, чтобы бот не зависал.",
+    }
+    
+    return error_messages.get(error_type, f"❌ Ошибка: {error_msg}\n\nПроверьте логи для получения дополнительной информации.")
+
+
+def _format_film_search_results(films: List[Dict[str, Any]], keyword: str, page: int) -> Tuple[str, InlineKeyboardMarkup]:
+    """Форматирует результаты поиска фильмов для отправки в Telegram"""
+    from html import escape
+    
+    lines = ["📽 <b>Результаты поиска</b>:\n"]
+    
+    for i, film in enumerate(films[:5], 1):
+        if not isinstance(film, dict):
+            continue
+        title = (
+            film.get("nameRu")
+            or film.get("nameEn")
+            or film.get("nameOriginal")
+            or film.get("name")
+            or "Без названия"
+        )
+        year = film.get("year") or ""
+        rating = (
+            film.get("ratingKinopoisk")
+            or film.get("ratingImdb")
+            or film.get("rating")
+            or ""
+        )
+        film_id = (
+            film.get("filmId")
+            or film.get("kinopoiskId")
+            or film.get("id")
+        )
+        description = (
+            film.get("description")
+            or film.get("shortDescription")
+            or ""
+        )
+        
+        title_e = escape(str(title))
+        year_e = escape(str(year)) if year else ""
+        rating_e = escape(str(rating)) if rating else ""
+        id_e = escape(str(film_id)) if film_id is not None else ""
+        desc_e = escape(str(description)) if description else ""
+        
+        line = f"{i}. <b>{title_e}</b>"
+        if year_e:
+            line += f" ({year_e})"
+        if rating_e:
+            line += f" — рейтинг: {rating_e}"
+        if id_e:
+            line += f" — ID: <code>{id_e}</code>"
+        if desc_e:
+            max_len = 200
+            short_desc = desc_e if len(desc_e) <= max_len else desc_e[: max_len - 1] + "…"
+            line += f"\n    {short_desc}"
+        
+        lines.append(line)
+    
+    # Кнопка "Следующая" для перехода на следующую страницу
+    next_page = page + 1
+    callback_data = f"kp_search:{keyword}:{next_page}"
+    keyboard = [[InlineKeyboardButton("Следующая", callback_data=callback_data)]]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    message = "\n".join(lines)
+    return message, reply_markup
+
+
 async def notion_tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /notion_tools для вывода списка доступных инструментов Notion"""
+    logger.info(
+        "Пользователь %s запросил использование MCP Notion (list_notion_tools)",
+        update.effective_user.id,
+    )
     await update.message.reply_text("🔍 Получаю список инструментов Notion...")
     
     try:
@@ -331,119 +420,26 @@ async def notion_tools_command(update: Update, context: ContextTypes.DEFAULT_TYP
         tools = await list_notion_tools()
         
         if not tools:
-            # Получаем детальную информацию об ошибке
             error_info = get_last_error()
-            if error_info:
-                error_type, error_msg = error_info
-                if error_type == "NODE_VERSION_ERROR":
-                    await update.message.reply_text(
-                        f"❌ {error_msg}\n\n"
-                        f"💡 После обновления Node.js перезапустите бота."
-                    )
-                elif error_type == "COMMAND_NOT_FOUND":
-                    await update.message.reply_text(
-                        f"❌ {error_msg}\n\n"
-                        f"💡 Совет: После установки Node.js перезапустите бота."
-                    )
-                elif error_type == "FILE_NOT_FOUND":
-                    await update.message.reply_text(
-                        f"❌ {error_msg}\n\n"
-                        f"💡 Убедитесь, что Node.js версии 18+ установлен и команда 'npx' доступна."
-                    )
-                elif error_type == "PERMISSION_ERROR":
-                    await update.message.reply_text(
-                        f"❌ {error_msg}"
-                    )
-                elif error_type == "IMPORT_ERROR":
-                    await update.message.reply_text(
-                        f"❌ {error_msg}"
-                    )
-                else:
-                    await update.message.reply_text(
-                        f"❌ Ошибка: {error_msg}\n\n"
-                        f"Проверьте логи для получения дополнительной информации."
-                    )
-            else:
-                await update.message.reply_text(
-                    "❌ Не удалось получить список инструментов Notion.\n\n"
-                    "Возможные причины:\n"
-                    "• MCP сервер Notion не установлен или не настроен\n"
-                    "• Команда MCP_NOTION_COMMAND неверна в .env файле\n"
-                    "• Ошибка подключения к MCP серверу\n\n"
-                    "Проверьте логи для получения дополнительной информации."
-                )
+            error_msg = _handle_tools_command_error(
+                error_info,
+                "❌ Не удалось получить список инструментов Notion.\n\n"
+                "Возможные причины:\n"
+                "• MCP сервер Notion не установлен или не настроен\n"
+                "• Команда MCP_NOTION_COMMAND неверна в .env файле\n"
+                "• Ошибка подключения к MCP серверу\n\n"
+                "Проверьте логи для получения дополнительной информации."
+            )
+            await update.message.reply_text(error_msg)
             return
         
-        # Формируем сообщение со списком инструментов
-        message_parts = ["📋 Доступные инструменты Notion:\n"]
+        # Форматируем список инструментов
+        full_message = format_tools_list(tools, "Notion")
         
-        for i, tool in enumerate(tools, 1):
-            # tool уже должен быть словарем после преобразования в mcp_client
-            if isinstance(tool, dict):
-                name = tool.get('name', 'Неизвестно')
-                description = tool.get('description', 'Нет описания')
-                
-                # Получаем параметры инструмента
-                input_schema = tool.get('inputSchema', {}) or tool.get('input_schema', {})
-                if isinstance(input_schema, dict):
-                    properties = input_schema.get('properties', {})
-                else:
-                    properties = {}
-            else:
-                # Fallback на случай, если объект не преобразован
-                name = getattr(tool, 'name', 'Неизвестно')
-                description = getattr(tool, 'description', 'Нет описания')
-                input_schema = getattr(tool, 'inputSchema', None) or getattr(tool, 'input_schema', None)
-                if input_schema and hasattr(input_schema, 'get'):
-                    properties = input_schema.get('properties', {}) if isinstance(input_schema, dict) else {}
-                else:
-                    properties = {}
-            
-            # Очищаем и экранируем HTML-символы в тексте
-            import re
-            from html import escape
-            
-            def clean_html_text(text: str) -> str:
-                """Удаляет недопустимые HTML-теги и экранирует специальные символы"""
-                if not text:
-                    return ""
-                # Удаляем недопустимые HTML-теги (например, <data-source>)
-                text = re.sub(r'<[^>]+>', '', str(text))
-                # Экранируем оставшиеся HTML-символы
-                text = escape(text)
-                return text
-            
-            name_cleaned = clean_html_text(name)
-            
-            tool_info = f"\n{i}. <b>{name_cleaned}</b>\n"
-            
-            if properties:
-                tool_info += "   Параметры:\n"
-                for param_name, param_info in properties.items():
-                    param_type = param_info.get('type', 'unknown') if isinstance(param_info, dict) else 'unknown'
-                    # Очищаем HTML в названии и типе параметра
-                    param_name_cleaned = clean_html_text(param_name)
-                    param_type_cleaned = clean_html_text(param_type)
-                    tool_info += f"   • {param_name_cleaned} ({param_type_cleaned})\n"
-            
-            message_parts.append(tool_info)
-        
-        full_message = "".join(message_parts)
-        
-        # Telegram имеет лимит 4096 символов на сообщение
-        if len(full_message) > 4000:
-            # Разбиваем на части
-            current_part = ""
-            for part in message_parts:
-                if len(current_part) + len(part) > 4000:
-                    await update.message.reply_text(current_part, parse_mode='HTML')
-                    current_part = part
-                else:
-                    current_part += part
-            if current_part:
-                await update.message.reply_text(current_part, parse_mode='HTML')
-        else:
-            await update.message.reply_text(full_message, parse_mode='HTML')
+        # Разбиваем на части, если нужно
+        message_parts = split_long_message(full_message)
+        for part in message_parts:
+            await update.message.reply_text(part, parse_mode='HTML')
         
         logger.info(f"Пользователь {update.effective_user.id} запросил список инструментов Notion, получено {len(tools)} инструментов")
         
@@ -477,6 +473,10 @@ async def notion_tools_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def kinopoisk_tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /kinopoisk_tools для вывода списка инструментов Kinopoisk MCP"""
+    logger.info(
+        "Пользователь %s запросил использование MCP Kinopoisk (list_kinopoisk_tools)",
+        update.effective_user.id,
+    )
     await update.message.reply_text("🔍 Получаю список инструментов Kinopoisk...")
     
     try:
@@ -485,91 +485,26 @@ async def kinopoisk_tools_command(update: Update, context: ContextTypes.DEFAULT_
         tools = await list_kinopoisk_tools()
         
         if not tools:
-            # Получаем детальную информацию об ошибке
             error_info = get_kinopoisk_last_error()
-            if error_info:
-                error_type, error_msg = error_info
-                if error_type in ("TIMEOUT_INIT", "TIMEOUT_TOOLS"):
-                    await update.message.reply_text(
-                        f"❌ {error_msg}\n\n"
-                        f"💡 Команда прервана по тайм-ауту, чтобы бот не зависал."
-                    )
-                else:
-                    await update.message.reply_text(
-                        f"❌ {error_msg}\n\n"
-                        f"Проверьте настройки Kinopoisk MCP и переменную окружения KINOPOISK_API_KEY."
-                    )
-            else:
-                await update.message.reply_text(
-                    "❌ Не удалось получить список инструментов Kinopoisk.\n\n"
-                    "Возможные причины:\n"
-                    "• MCP сервер Kinopoisk не найден или не запускается\n"
-                    "• Неверно указан путь в MCP_KINOPOISK_ARGS\n"
-                    "• Не указан KINOPOISK_API_KEY\n\n"
-                    "Проверьте логи для получения дополнительной информации."
-                )
+            error_msg = _handle_tools_command_error(
+                error_info,
+                "❌ Не удалось получить список инструментов Kinopoisk.\n\n"
+                "Возможные причины:\n"
+                "• MCP сервер Kinopoisk не найден или не запускается\n"
+                "• Неверно указан путь в MCP_KINOPOISK_ARGS\n"
+                "• Не указан KINOPOISK_API_KEY\n\n"
+                "Проверьте логи для получения дополнительной информации."
+            )
+            await update.message.reply_text(error_msg)
             return
         
-        # Формируем сообщение со списком инструментов
-        message_parts = ["📋 Доступные инструменты Kinopoisk MCP:\n"]
+        # Форматируем список инструментов
+        full_message = format_tools_list(tools, "Kinopoisk MCP")
         
-        for i, tool in enumerate(tools, 1):
-            # Ожидаем словарь после преобразования в mcp_kinopoisk_client
-            if isinstance(tool, dict):
-                name = tool.get('name', 'Неизвестно')
-                input_schema = tool.get('inputSchema', {}) or tool.get('input_schema', {})
-                if isinstance(input_schema, dict):
-                    properties = input_schema.get('properties', {})
-                else:
-                    properties = {}
-            else:
-                name = getattr(tool, 'name', 'Неизвестно')
-                input_schema = getattr(tool, 'inputSchema', None) or getattr(tool, 'input_schema', None)
-                if input_schema and hasattr(input_schema, 'get'):
-                    properties = input_schema.get('properties', {}) if isinstance(input_schema, dict) else {}
-                else:
-                    properties = {}
-            
-            import re
-            from html import escape
-            
-            def clean_html_text(text: str) -> str:
-                """Удаляет недопустимые HTML-теги и экранирует специальные символы"""
-                if not text:
-                    return ""
-                text = re.sub(r'<[^>]+>', '', str(text))
-                text = escape(text)
-                return text
-            
-            name_cleaned = clean_html_text(name)
-            
-            tool_info = f"\n{i}. <b>{name_cleaned}</b>\n"
-            
-            if properties:
-                tool_info += "   Параметры:\n"
-                for param_name, param_info in properties.items():
-                    param_type = param_info.get('type', 'unknown') if isinstance(param_info, dict) else 'unknown'
-                    param_name_cleaned = clean_html_text(param_name)
-                    param_type_cleaned = clean_html_text(param_type)
-                    tool_info += f"   • {param_name_cleaned} ({param_type_cleaned})\n"
-            
-            message_parts.append(tool_info)
-        
-        full_message = "".join(message_parts)
-        
-        # Telegram имеет лимит 4096 символов на сообщение
-        if len(full_message) > 4000:
-            current_part = ""
-            for part in message_parts:
-                if len(current_part) + len(part) > 4000:
-                    await update.message.reply_text(current_part, parse_mode='HTML')
-                    current_part = part
-                else:
-                    current_part += part
-            if current_part:
-                await update.message.reply_text(current_part, parse_mode='HTML')
-        else:
-            await update.message.reply_text(full_message, parse_mode='HTML')
+        # Разбиваем на части, если нужно
+        message_parts = split_long_message(full_message)
+        for part in message_parts:
+            await update.message.reply_text(part, parse_mode='HTML')
         
         logger.info(
             f"Пользователь {update.effective_user.id} запросил список инструментов Kinopoisk MCP, "
@@ -634,6 +569,13 @@ async def kp_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
+    user_id = update.effective_user.id
+    logger.info(
+        "Пользователь %s инициировал MCP Kinopoisk поиск (search_movie): keyword=%r, page=%s",
+        user_id,
+        keyword,
+        page,
+    )
     await update.message.reply_text(f"🎬 Ищу фильмы по запросу: {keyword!r} (страница {page})...")
 
     try:
@@ -698,66 +640,7 @@ async def kp_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
         # Формируем компактный список (топ-5 результатов)
-        from html import escape
-
-        lines = ["📽 <b>Результаты поиска</b>:\n"]
-
-        for i, film in enumerate(films[:5], 1):
-            if not isinstance(film, dict):
-                continue
-            title = (
-                film.get("nameRu")
-                or film.get("nameEn")
-                or film.get("nameOriginal")
-                or film.get("name")
-                or "Без названия"
-            )
-            year = film.get("year") or ""
-            rating = (
-                film.get("ratingKinopoisk")
-                or film.get("ratingImdb")
-                or film.get("rating")
-                or ""
-            )
-            film_id = (
-                film.get("filmId")
-                or film.get("kinopoiskId")
-                or film.get("id")
-            )
-            description = (
-                film.get("description")
-                or film.get("shortDescription")
-                or ""
-            )
-
-            title_e = escape(str(title))
-            year_e = escape(str(year)) if year else ""
-            rating_e = escape(str(rating)) if rating else ""
-            id_e = escape(str(film_id)) if film_id is not None else ""
-            desc_e = escape(str(description)) if description else ""
-
-            line = f"{i}. <b>{title_e}</b>"
-            if year_e:
-                line += f" ({year_e})"
-            if rating_e:
-                line += f" — рейтинг: {rating_e}"
-            if id_e:
-                line += f" — ID: <code>{id_e}</code>"
-            if desc_e:
-                # Краткое описание на следующей строке
-                max_len = 200
-                short_desc = desc_e if len(desc_e) <= max_len else desc_e[: max_len - 1] + "…"
-                line += f"\n    {short_desc}"
-
-            lines.append(line)
-
-        # Кнопка "Следующая" для перехода на следующую страницу
-        next_page = page + 1
-        callback_data = f"kp_search:{keyword}:{next_page}"
-        keyboard = [[InlineKeyboardButton("Следующая", callback_data=callback_data)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        message = "\n".join(lines)
+        message, reply_markup = _format_film_search_results(films, keyword, page)
         await update.message.reply_text(message, parse_mode="HTML", reply_markup=reply_markup)
 
     except Exception as e:
@@ -792,7 +675,15 @@ async def kp_search_pagination_callback(update: Update, context: ContextTypes.DE
     except ValueError:
         page = 1
 
+    user_id = query.from_user.id if query.from_user else None
     chat_id = query.message.chat_id if query.message else update.effective_chat.id
+
+    logger.info(
+        "Пользователь %s инициировал MCP Kinopoisk пагинацию (search_movie): keyword=%r, page=%s",
+        user_id,
+        keyword,
+        page,
+    )
 
     try:
         raw_result = await call_kinopoisk_tool(
@@ -864,66 +755,8 @@ async def kp_search_pagination_callback(update: Update, context: ContextTypes.DE
             return
 
         # Формируем компактный список (топ-5 результатов)
-        from html import escape
-
-        lines = ["📽 <b>Результаты поиска</b>:\n"]
-
-        for i, film in enumerate(films[:5], 1):
-            if not isinstance(film, dict):
-                continue
-            title = (
-                film.get("nameRu")
-                or film.get("nameEn")
-                or film.get("nameOriginal")
-                or film.get("name")
-                or "Без названия"
-            )
-            year = film.get("year") or ""
-            rating = (
-                film.get("ratingKinopoisk")
-                or film.get("ratingImdb")
-                or film.get("rating")
-                or ""
-            )
-            film_id = (
-                film.get("filmId")
-                or film.get("kinopoiskId")
-                or film.get("id")
-            )
-            description = (
-                film.get("description")
-                or film.get("shortDescription")
-                or ""
-            )
-
-            title_e = escape(str(title))
-            year_e = escape(str(year)) if year else ""
-            rating_e = escape(str(rating)) if rating else ""
-            id_e = escape(str(film_id)) if film_id is not None else ""
-            desc_e = escape(str(description)) if description else ""
-
-            line = f"{i}. <b>{title_e}</b>"
-            if year_e:
-                line += f" ({year_e})"
-            if rating_e:
-                line += f" — рейтинг: {rating_e}"
-            if id_e:
-                line += f" — ID: <code>{id_e}</code>"
-            if desc_e:
-                max_len = 200
-                short_desc = desc_e if len(desc_e) <= max_len else desc_e[: max_len - 1] + "…"
-                line += f"\n    {short_desc}"
-
-            lines.append(line)
-
-        # Кнопка "Следующая" для перехода на следующую страницу
-        next_page = page + 1
-        callback_next = f"kp_search:{keyword}:{next_page}"
-        keyboard = [[InlineKeyboardButton("Следующая", callback_data=callback_next)]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-
-        message = "\n".join(lines)
-
+        message, reply_markup = _format_film_search_results(films, keyword, page)
+        
         # Обновляем существующее сообщение, если оно есть, иначе отправляем новое
         if query.message:
             await query.message.edit_text(

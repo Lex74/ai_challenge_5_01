@@ -1,7 +1,9 @@
 """Модуль для работы с OpenAI API"""
 import time
 import logging
+import json
 import requests
+from typing import Optional, List, Dict, Any
 
 from config import OPENAI_API_KEY, OPENAI_API_URL, ADMIN_USER_ID
 from constants import (
@@ -103,9 +105,16 @@ async def query_openai(
     temperature: float,
     model: str,
     max_tokens: int,
-    bot=None
+    bot=None,
+    tools: Optional[List[Dict[str, Any]]] = None
 ) -> tuple[str, list]:
-    """Отправляет запрос в OpenAI API и возвращает ответ и обновленную историю"""
+    """Отправляет запрос в OpenAI API и возвращает ответ и обновленную историю
+    
+    Поддерживает function calling с MCP инструментами.
+    Если LLM решает вызвать инструмент, он вызывается, и результат отправляется обратно в LLM.
+    """
+    from mcp_integration import call_mcp_tool
+    
     headers = {
         "Authorization": f"Bearer {OPENAI_API_KEY}",
         "Content-Type": "application/json"
@@ -135,6 +144,15 @@ async def query_openai(
         "messages": messages
     }
     
+    # Добавляем tools, если они предоставлены
+    if tools:
+        payload["tools"] = tools
+        payload["tool_choice"] = "auto"  # LLM решает, использовать ли инструменты
+        logger.info(f"Передано {len(tools)} инструментов в OpenAI API для function calling")
+        # Логируем названия инструментов для отладки
+        tool_names = [t.get('function', {}).get('name', 'unknown') for t in tools]
+        logger.debug(f"Доступные инструменты: {', '.join(tool_names)}")
+    
     if model.startswith("gpt-5"):
         payload["max_completion_tokens"] = max_tokens
         # GPT-5 не поддерживает параметр temperature
@@ -155,74 +173,197 @@ async def query_openai(
         
         data = response.json()
         
-        # Извлекаем ответ из структуры ответа OpenAI
-        if 'choices' in data and len(data['choices']) > 0:
-            choice = data['choices'][0]
-            answer = choice.get('message', {}).get('content', '')
-            finish_reason = choice.get('finish_reason', '')
+        # Обрабатываем ответ с поддержкой function calling
+        max_iterations = 5  # Максимальное количество итераций вызовов инструментов
+        iteration = 0
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        answer = ""
+        finish_reason = ""
+        
+        while iteration < max_iterations:
+            iteration += 1
             
-            # Для GPT-5 проверяем, если content пустой из-за лимита токенов
-            if model.startswith("gpt-5") and not answer and finish_reason == "length":
-                usage = data.get('usage', {})
-                completion_tokens = usage.get('completion_tokens', 0)
-                completion_details = usage.get('completion_tokens_details', {})
-                reasoning_tokens = completion_details.get('reasoning_tokens', 0)
+            # Извлекаем ответ из структуры ответа OpenAI
+            if 'choices' in data and len(data['choices']) > 0:
+                choice = data['choices'][0]
+                message = choice.get('message', {})
+                answer = message.get('content', '')
+                finish_reason = choice.get('finish_reason', '')
+                tool_calls = message.get('tool_calls', [])
                 
-                answer = (
-                    f"⚠️ Достигнут лимит токенов. Все {completion_tokens} токенов ушли на рассуждения (reasoning tokens: {reasoning_tokens}). "
-                    f"Модель не успела сгенерировать финальный ответ.\n\n"
-                    f"Рекомендуется увеличить max_tokens (текущее значение: {max_tokens}) для получения полного ответа."
-                )
+                # Добавляем сообщение ассистента в историю для следующей итерации
+                assistant_message = {"role": "assistant", "content": answer or ""}
+                if tool_calls:
+                    assistant_message["tool_calls"] = tool_calls
+                messages.append(assistant_message)
                 
-                logger.warning(
-                    f"GPT-5 вернул пустой content. Finish reason: {finish_reason}, "
-                    f"Reasoning tokens: {reasoning_tokens}/{completion_tokens}"
-                )
-            
-            # Если ответ все еще пустой, возвращаем сообщение об ошибке
-            if not answer:
-                answer = "Извините, не удалось получить ответ от модели."
-            
-            # Извлекаем информацию из ответа API
+                # Если LLM решила вызвать инструменты
+                if tool_calls and finish_reason == 'tool_calls':
+                    logger.info(f"LLM решила вызвать {len(tool_calls)} инструмент(ов)")
+                    
+                    # Вызываем все запрошенные инструменты
+                    tool_results = []
+                    for tool_call in tool_calls:
+                        tool_id = tool_call.get('id')
+                        tool_name = tool_call.get('function', {}).get('name', '')
+                        tool_args_str = tool_call.get('function', {}).get('arguments', '{}')
+                        
+                        # Парсим аргументы
+                        try:
+                            tool_args = json.loads(tool_args_str)
+                        except json.JSONDecodeError:
+                            logger.error(f"Не удалось распарсить аргументы инструмента {tool_name}: {tool_args_str}")
+                            tool_args = {}
+                        
+                        # Вызываем MCP инструмент
+                        logger.info(f"Вызываю MCP инструмент: {tool_name} с аргументами: {tool_args}")
+                        tool_result = await call_mcp_tool(tool_name, tool_args)
+                        
+                        if tool_result is None:
+                            tool_result = "Ошибка при вызове инструмента"
+                        
+                        # Добавляем результат в список
+                        tool_results.append({
+                            "tool_call_id": tool_id,
+                            "role": "tool",
+                            "name": tool_name,
+                            "content": str(tool_result)
+                        })
+                    
+                    # Добавляем результаты инструментов в сообщения
+                    messages.extend(tool_results)
+                    
+                    # Отправляем запрос снова с результатами инструментов
+                    payload = {
+                        "model": model,
+                        "messages": messages
+                    }
+                    
+                    if tools:
+                        payload["tools"] = tools
+                        payload["tool_choice"] = "auto"
+                    
+                    if model.startswith("gpt-5"):
+                        payload["max_completion_tokens"] = max_tokens
+                    else:
+                        payload["max_tokens"] = max_tokens
+                        payload["temperature"] = temperature
+                    
+                    # Делаем следующий запрос
+                    response = requests.post(OPENAI_API_URL, json=payload, headers=headers, timeout=API_TIMEOUT)
+                    response.raise_for_status()
+                    data = response.json()
+                    
+                    # Накапливаем токены
+                    usage = data.get('usage', {})
+                    total_prompt_tokens += usage.get('prompt_tokens', 0)
+                    total_completion_tokens += usage.get('completion_tokens', 0)
+                    
+                    # Продолжаем цикл для обработки следующего ответа
+                    continue
+                else:
+                    # Если это не tool_calls, выходим из цикла
+                    break
+            else:
+                # Если нет choices, выходим из цикла
+                logger.warning("Нет choices в ответе API, выходим из цикла")
+                break
+        
+        # Проверяем, достигли ли мы лимита итераций
+        if iteration >= max_iterations and finish_reason == 'tool_calls':
+            logger.warning(f"Достигнут лимит итераций ({max_iterations}) при обработке function calling")
+            answer = "Извините, достигнут лимит вызовов инструментов. Попробуйте упростить запрос."
+            updated_history = conversation_history.copy()
+            updated_history.append({"role": "user", "content": question})
+            return answer, updated_history
+        
+        # Если answer пустой и мы вышли из цикла, значит что-то пошло не так
+        if not answer:
+            logger.error("Получен пустой ответ после обработки function calling")
+            answer = "Извините, не удалось получить ответ от модели."
+            updated_history = conversation_history.copy()
+            updated_history.append({"role": "user", "content": question})
+            return answer, updated_history
+        
+        # Если это финальный ответ (не tool_calls)
+        # Для GPT-5 проверяем, если content пустой из-за лимита токенов
+        if model.startswith("gpt-5") and not answer and finish_reason == "length":
             usage = data.get('usage', {})
-            prompt_tokens = usage.get('prompt_tokens', 0)
             completion_tokens = usage.get('completion_tokens', 0)
-            total_tokens = usage.get('total_tokens', 0)
-            
-            # Проверяем наличие reasoning tokens
             completion_details = usage.get('completion_tokens_details', {})
             reasoning_tokens = completion_details.get('reasoning_tokens', 0)
             
-            # Рассчитываем стоимость
-            total_cost = calculate_cost(model, prompt_tokens, completion_tokens)
-            
-            # Логируем информацию о запросе
-            log_message = (
-                f"OpenAI API запрос - Модель: {model}, "
-                f"Время ответа: {response_time:.3f}с, "
-                f"Prompt tokens: {prompt_tokens}, Completion tokens: {completion_tokens}"
+            answer = (
+                f"⚠️ Достигнут лимит токенов. Все {completion_tokens} токенов ушли на рассуждения (reasoning tokens: {reasoning_tokens}). "
+                f"Модель не успела сгенерировать финальный ответ.\n\n"
+                f"Рекомендуется увеличить max_tokens (текущее значение: {max_tokens}) для получения полного ответа."
             )
             
-            # Добавляем reasoning tokens, если они есть
-            if reasoning_tokens > 0:
-                log_message += f", Reasoning tokens: {reasoning_tokens}"
-            
-            log_message += f", Total cost: ${total_cost:.6f}"
-            
-            logger.info(log_message)
-            
-            # Отправляем лог админу
-            if bot:
-                await send_log_to_admin(bot, log_message)
-            
-            # Обновляем историю: добавляем вопрос пользователя и ответ бота
-            updated_history = conversation_history.copy()
-            updated_history.append({"role": "user", "content": question})
-            updated_history.append({"role": "assistant", "content": answer})
-            
-            return answer, updated_history
-        else:
-            return "Извините, не удалось получить ответ от API.", conversation_history
+            logger.warning(
+                f"GPT-5 вернул пустой content. Finish reason: {finish_reason}, "
+                f"Reasoning tokens: {reasoning_tokens}/{completion_tokens}"
+            )
+        
+        # Если ответ все еще пустой, возвращаем сообщение об ошибке
+        if not answer:
+            answer = "Извините, не удалось получить ответ от модели."
+        
+        # Извлекаем информацию из ответа API (используем накопленные значения или последний ответ)
+        usage = data.get('usage', {})
+        if total_prompt_tokens == 0:
+            total_prompt_tokens = usage.get('prompt_tokens', 0)
+        if total_completion_tokens == 0:
+            total_completion_tokens = usage.get('completion_tokens', 0)
+        total_tokens = total_prompt_tokens + total_completion_tokens
+        
+        # Проверяем наличие reasoning tokens
+        completion_details = usage.get('completion_tokens_details', {})
+        reasoning_tokens = completion_details.get('reasoning_tokens', 0)
+        
+        # Рассчитываем стоимость
+        total_cost = calculate_cost(model, total_prompt_tokens, total_completion_tokens)
+        
+        # Логируем информацию о запросе
+        log_message = (
+            f"OpenAI API запрос - Модель: {model}, "
+            f"Время ответа: {response_time:.3f}с, "
+            f"Итераций: {iteration}, "
+            f"Prompt tokens: {total_prompt_tokens}, Completion tokens: {total_completion_tokens}"
+        )
+        
+        # Добавляем reasoning tokens, если они есть
+        if reasoning_tokens > 0:
+            log_message += f", Reasoning tokens: {reasoning_tokens}"
+        
+        log_message += f", Total cost: ${total_cost:.6f}"
+        
+        logger.info(log_message)
+        
+        # Отправляем лог админу
+        if bot:
+            await send_log_to_admin(bot, log_message)
+        
+        # Обновляем историю: добавляем вопрос пользователя и ответ бота
+        updated_history = conversation_history.copy()
+        updated_history.append({"role": "user", "content": question})
+        
+        # Добавляем все сообщения ассистента и инструментов из текущего запроса
+        # messages содержит: [system_prompt, ...history..., user_question, assistant_msg, tool_results, ...]
+        # Нам нужно добавить только новые сообщения после user_question
+        # Находим индекс user_question в messages
+        user_msg_index = len(messages) - 1
+        for i, msg in enumerate(messages):
+            if msg.get("role") == "user" and msg.get("content") == question:
+                user_msg_index = i
+                break
+        
+        # Добавляем все сообщения после user_question (assistant и tool)
+        for msg in messages[user_msg_index + 1:]:
+            if msg.get("role") in ["assistant", "tool"]:
+                updated_history.append(msg)
+        
+        return answer, updated_history
             
     except requests.exceptions.HTTPError as e:
         # Логируем детали ошибки для диагностики

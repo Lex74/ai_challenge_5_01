@@ -57,15 +57,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Получаем max_tokens из user_data или используем дефолтное
         max_tokens = context.user_data.get('max_tokens', MAX_TOKENS)
         
+        # Получаем доступные MCP инструменты из bot_data (загружены при старте)
+        mcp_tools = context.bot_data.get('mcp_tools', [])
+        if mcp_tools:
+            logger.debug(f"Используется {len(mcp_tools)} MCP инструментов из bot_data")
+        
         # Формируем полную историю: summary (если есть) + recent_messages
         # Если есть summary, объединяем его с системным промптом
         full_system_prompt = system_prompt
         if summary:
             full_system_prompt = f"{system_prompt}\n\nКонтекст предыдущих диалогов:\n{summary}"
         
+        # Добавляем информацию о доступных MCP инструментах в системный промпт
+        if mcp_tools:
+            tools_info = []
+            kinopoisk_tools_count = 0
+            for tool in mcp_tools:
+                tool_func = tool.get('function', {})
+                tool_name = tool_func.get('name', '')
+                tool_desc = tool_func.get('description', '')
+                if tool_name.startswith('kinopoisk_'):
+                    tools_info.append(f"- {tool_name}: {tool_desc}")
+                    kinopoisk_tools_count += 1
+            
+            if tools_info and kinopoisk_tools_count > 0:
+                tools_prompt = (
+                    "\n\n"
+                    "КРИТИЧЕСКИ ВАЖНО: У тебя есть доступ к инструментам Kinopoisk для поиска актуальной информации о фильмах. "
+                    "Если пользователь спрашивает о фильмах (включая фильмы 2025 года, будущие релизы, поиск фильмов, подборки, рекомендации), "
+                    "ТЫ ОБЯЗАН использовать доступные инструменты Kinopoisk. "
+                    "НИКОГДА не говори, что у тебя нет информации о фильмах - всегда используй инструменты для получения актуальных данных. "
+                    f"Доступно {kinopoisk_tools_count} инструмент(ов) Kinopoisk:\n" + 
+                    "\n".join(tools_info) +
+                    "\n\nИспользуй эти инструменты автоматически, когда пользователь спрашивает о фильмах!"
+                )
+                full_system_prompt += tools_prompt
+        
         full_conversation_history = recent_messages.copy()
         
-        # Получаем ответ от OpenAI с полной историей диалога
+        # Получаем ответ от OpenAI с полной историей диалога и MCP инструментами
         answer, updated_history = await query_openai(
             user_message,
             full_conversation_history,
@@ -73,7 +103,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             temperature,
             model,
             max_tokens,
-            context.bot
+            context.bot,
+            tools=mcp_tools if mcp_tools else None
         )
         
         # Удаляем сообщение "Думаю..."

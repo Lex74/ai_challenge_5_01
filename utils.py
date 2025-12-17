@@ -1,5 +1,7 @@
 """Утилиты для форматирования и обработки текста"""
 import re
+from typing import List, Dict, Any
+from html import escape
 
 from constants import GOAL_FORMULATED_MARKER
 
@@ -69,3 +71,80 @@ def convert_markdown_to_telegram(text: str) -> str:
     text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
     
     return text
+
+
+def clean_html_text(text: str) -> str:
+    """Удаляет недопустимые HTML-теги и экранирует специальные символы"""
+    if not text:
+        return ""
+    # Удаляем недопустимые HTML-теги (например, <data-source>)
+    text = re.sub(r'<[^>]+>', '', str(text))
+    # Экранируем оставшиеся HTML-символы
+    text = escape(text)
+    return text
+
+
+def format_tools_list(tools: List[Dict[str, Any]], server_name: str) -> str:
+    """Форматирует список инструментов для отправки в Telegram"""
+    message_parts = [f"📋 Доступные инструменты {server_name}:\n"]
+    
+    for i, tool in enumerate(tools, 1):
+        # Ожидаем словарь после преобразования в MCP клиенте
+        if isinstance(tool, dict):
+            name = tool.get('name', 'Неизвестно')
+            input_schema = tool.get('inputSchema', {}) or tool.get('input_schema', {})
+            if isinstance(input_schema, dict):
+                properties = input_schema.get('properties', {})
+            else:
+                properties = {}
+        else:
+            name = getattr(tool, 'name', 'Неизвестно')
+            input_schema = getattr(tool, 'inputSchema', None) or getattr(tool, 'input_schema', None)
+            if input_schema and hasattr(input_schema, 'get'):
+                properties = input_schema.get('properties', {}) if isinstance(input_schema, dict) else {}
+            else:
+                properties = {}
+        
+        name_cleaned = clean_html_text(name)
+        
+        tool_info = f"\n{i}. <b>{name_cleaned}</b>\n"
+        
+        if properties:
+            tool_info += "   Параметры:\n"
+            for param_name, param_info in properties.items():
+                param_type = param_info.get('type', 'unknown') if isinstance(param_info, dict) else 'unknown'
+                param_name_cleaned = clean_html_text(param_name)
+                param_type_cleaned = clean_html_text(param_type)
+                tool_info += f"   • {param_name_cleaned} ({param_type_cleaned})\n"
+        
+        message_parts.append(tool_info)
+    
+    return "".join(message_parts)
+
+
+def split_long_message(message: str, max_length: int = 4000) -> List[str]:
+    """Разбивает длинное сообщение на части для Telegram (лимит 4096 символов)"""
+    if len(message) <= max_length:
+        return [message]
+    
+    # Пытаемся разбить по строкам
+    lines = message.split('\n')
+    parts = []
+    current_part = ""
+    
+    for line in lines:
+        if len(current_part) + len(line) + 1 > max_length:
+            if current_part:
+                parts.append(current_part)
+                current_part = line
+            else:
+                # Если одна строка слишком длинная, обрезаем её
+                parts.append(line[:max_length])
+                current_part = line[max_length:]
+        else:
+            current_part += ('\n' if current_part else '') + line
+    
+    if current_part:
+        parts.append(current_part)
+    
+    return parts

@@ -1,8 +1,9 @@
 """Основной файл для запуска Telegram бота"""
+import asyncio
 import logging
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 from config import TELEGRAM_BOT_TOKEN
 from handlers.commands import (
@@ -22,10 +23,9 @@ from handlers.commands import (
     resetmaxtokens_command,
     notion_tools_command,
     kinopoisk_tools_command,
-    kp_search_command,
-    kp_search_pagination_callback,
 )
 from handlers.messages import handle_message
+from mcp_integration import get_all_mcp_tools
 
 # Настройка логирования
 logging.basicConfig(
@@ -35,10 +35,22 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+async def post_init(application: Application) -> None:
+    """Инициализация после создания приложения - загружаем MCP инструменты"""
+    logger.info("Загружаю MCP инструменты при старте бота...")
+    try:
+        mcp_tools = await get_all_mcp_tools()
+        application.bot_data['mcp_tools'] = mcp_tools
+        logger.info(f"Успешно загружено {len(mcp_tools)} MCP инструментов при старте бота")
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке MCP инструментов при старте: {e}", exc_info=True)
+        application.bot_data['mcp_tools'] = []
+
+
 def main():
     """Основная функция для запуска бота"""
     # Создаем приложение
-    application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    application = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(post_init).build()
     
     # Регистрируем обработчики команд
     application.add_handler(CommandHandler("start", start))
@@ -57,8 +69,6 @@ def main():
     application.add_handler(CommandHandler("resetmaxtokens", resetmaxtokens_command))
     application.add_handler(CommandHandler("notion_tools", notion_tools_command))
     application.add_handler(CommandHandler("kinopoisk_tools", kinopoisk_tools_command))
-    application.add_handler(CommandHandler("kp_search", kp_search_command))
-    application.add_handler(CallbackQueryHandler(kp_search_pagination_callback, pattern=r"^kp_search:"))
     
     # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
