@@ -2,7 +2,7 @@
 import logging
 
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
 from config import TELEGRAM_BOT_TOKEN
 from handlers.commands import (
@@ -21,6 +21,9 @@ from handlers.commands import (
     getmaxtokens_command,
     resetmaxtokens_command,
     notion_tools_command,
+    kinopoisk_tools_command,
+    kp_search_command,
+    kp_search_pagination_callback,
 )
 from handlers.messages import handle_message
 
@@ -53,6 +56,9 @@ def main():
     application.add_handler(CommandHandler("getmaxtokens", getmaxtokens_command))
     application.add_handler(CommandHandler("resetmaxtokens", resetmaxtokens_command))
     application.add_handler(CommandHandler("notion_tools", notion_tools_command))
+    application.add_handler(CommandHandler("kinopoisk_tools", kinopoisk_tools_command))
+    application.add_handler(CommandHandler("kp_search", kp_search_command))
+    application.add_handler(CallbackQueryHandler(kp_search_pagination_callback, pattern=r"^kp_search:"))
     
     # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

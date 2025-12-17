@@ -1,7 +1,8 @@
 """Обработчики команд бота"""
 import logging
+import json
 
-from telegram import Update
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
 from constants import (
@@ -73,7 +74,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/setmaxtokens - установить максимальное количество токенов (например: 2000)\n"
         "/getmaxtokens - показать текущее максимальное количество токенов\n"
         "/resetmaxtokens - сбросить к дефолтному значению (1000)\n\n"
-        "/notion_tools - показать список доступных инструментов Notion\n\n"
+        "/notion_tools - показать список доступных инструментов Notion\n"
+        "/kinopoisk_tools - показать список доступных инструментов Kinopoisk MCP\n"
+        "/kp_search - поиск фильмов или подборок по названию и тематике "
+        "на Кинопоиске (результаты можно листать кнопкой «Следующая»)\n\n"
         "Температура влияет на креативность ответов (диапазон: 0.0-2.0)"
     )
 
@@ -468,4 +472,480 @@ async def notion_tools_command(update: Update, context: ContextTypes.DEFAULT_TYP
         logger.error(f"Ошибка при выполнении команды /notion_tools: {e}")
         await update.message.reply_text(
             f"❌ Произошла ошибка при получении списка инструментов:\n{str(e)}"
+        )
+
+
+async def kinopoisk_tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /kinopoisk_tools для вывода списка инструментов Kinopoisk MCP"""
+    await update.message.reply_text("🔍 Получаю список инструментов Kinopoisk...")
+    
+    try:
+        from mcp_kinopoisk_client import list_kinopoisk_tools, get_kinopoisk_last_error
+        
+        tools = await list_kinopoisk_tools()
+        
+        if not tools:
+            # Получаем детальную информацию об ошибке
+            error_info = get_kinopoisk_last_error()
+            if error_info:
+                error_type, error_msg = error_info
+                if error_type in ("TIMEOUT_INIT", "TIMEOUT_TOOLS"):
+                    await update.message.reply_text(
+                        f"❌ {error_msg}\n\n"
+                        f"💡 Команда прервана по тайм-ауту, чтобы бот не зависал."
+                    )
+                else:
+                    await update.message.reply_text(
+                        f"❌ {error_msg}\n\n"
+                        f"Проверьте настройки Kinopoisk MCP и переменную окружения KINOPOISK_API_KEY."
+                    )
+            else:
+                await update.message.reply_text(
+                    "❌ Не удалось получить список инструментов Kinopoisk.\n\n"
+                    "Возможные причины:\n"
+                    "• MCP сервер Kinopoisk не найден или не запускается\n"
+                    "• Неверно указан путь в MCP_KINOPOISK_ARGS\n"
+                    "• Не указан KINOPOISK_API_KEY\n\n"
+                    "Проверьте логи для получения дополнительной информации."
+                )
+            return
+        
+        # Формируем сообщение со списком инструментов
+        message_parts = ["📋 Доступные инструменты Kinopoisk MCP:\n"]
+        
+        for i, tool in enumerate(tools, 1):
+            # Ожидаем словарь после преобразования в mcp_kinopoisk_client
+            if isinstance(tool, dict):
+                name = tool.get('name', 'Неизвестно')
+                input_schema = tool.get('inputSchema', {}) or tool.get('input_schema', {})
+                if isinstance(input_schema, dict):
+                    properties = input_schema.get('properties', {})
+                else:
+                    properties = {}
+            else:
+                name = getattr(tool, 'name', 'Неизвестно')
+                input_schema = getattr(tool, 'inputSchema', None) or getattr(tool, 'input_schema', None)
+                if input_schema and hasattr(input_schema, 'get'):
+                    properties = input_schema.get('properties', {}) if isinstance(input_schema, dict) else {}
+                else:
+                    properties = {}
+            
+            import re
+            from html import escape
+            
+            def clean_html_text(text: str) -> str:
+                """Удаляет недопустимые HTML-теги и экранирует специальные символы"""
+                if not text:
+                    return ""
+                text = re.sub(r'<[^>]+>', '', str(text))
+                text = escape(text)
+                return text
+            
+            name_cleaned = clean_html_text(name)
+            
+            tool_info = f"\n{i}. <b>{name_cleaned}</b>\n"
+            
+            if properties:
+                tool_info += "   Параметры:\n"
+                for param_name, param_info in properties.items():
+                    param_type = param_info.get('type', 'unknown') if isinstance(param_info, dict) else 'unknown'
+                    param_name_cleaned = clean_html_text(param_name)
+                    param_type_cleaned = clean_html_text(param_type)
+                    tool_info += f"   • {param_name_cleaned} ({param_type_cleaned})\n"
+            
+            message_parts.append(tool_info)
+        
+        full_message = "".join(message_parts)
+        
+        # Telegram имеет лимит 4096 символов на сообщение
+        if len(full_message) > 4000:
+            current_part = ""
+            for part in message_parts:
+                if len(current_part) + len(part) > 4000:
+                    await update.message.reply_text(current_part, parse_mode='HTML')
+                    current_part = part
+                else:
+                    current_part += part
+            if current_part:
+                await update.message.reply_text(current_part, parse_mode='HTML')
+        else:
+            await update.message.reply_text(full_message, parse_mode='HTML')
+        
+        logger.info(
+            f"Пользователь {update.effective_user.id} запросил список инструментов Kinopoisk MCP, "
+            f"получено {len(tools)} инструментов"
+        )
+    
+    except ImportError as e:
+        error_msg = str(e)
+        if 'mcp' in error_msg:
+            logger.error(f"Ошибка импорта mcp: {e}")
+            await update.message.reply_text(
+                "❌ Библиотека mcp не установлена.\n\n"
+                "Для установки выполните:\n"
+                "```\n"
+                "pip install mcp\n"
+                "```\n\n"
+                "Или установите все зависимости:\n"
+                "```\n"
+                "pip install -r requirements.txt\n"
+                "```"
+            )
+        else:
+            logger.error(f"Ошибка импорта mcp_kinopoisk_client: {e}")
+            await update.message.reply_text(
+                f"❌ Ошибка импорта: {e}\n\n"
+                "Установите зависимости: pip install -r requirements.txt"
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при выполнении команды /kinopoisk_tools: {e}")
+        await update.message.reply_text(
+            f"❌ Произошла ошибка при получении списка инструментов Kinopoisk:\n{str(e)}"
+        )
+
+
+async def kp_search_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Поиск фильмов на Кинопоиске по ключевому слову через MCP."""
+    from mcp_kinopoisk_client import call_kinopoisk_tool, get_kinopoisk_last_error
+
+    if not context.args:
+        await update.message.reply_text(
+            "Использование:\n"
+            "/kp_search <ключевое_слово> [страница]\n\n"
+            "Примеры:\n"
+            "/kp_search Интерстеллар\n"
+            "/kp_search Гарри Поттер 2"
+        )
+        return
+
+    # Последний аргумент можно трактовать как номер страницы, если это число
+    *keyword_parts, last_arg = context.args if len(context.args) > 1 else (context.args[0],)
+    page = 1
+    if isinstance(last_arg, str) and last_arg.isdigit() and len(context.args) > 1:
+        page = int(last_arg)
+        keyword = " ".join(keyword_parts).strip()
+    else:
+        keyword = " ".join(context.args).strip()
+
+    if not keyword:
+        await update.message.reply_text(
+            "Пожалуйста, укажи ключевое слово для поиска.\n"
+            "Пример: /kp_search Интерстеллар"
+        )
+        return
+
+    await update.message.reply_text(f"🎬 Ищу фильмы по запросу: {keyword!r} (страница {page})...")
+
+    try:
+        raw_result = await call_kinopoisk_tool(
+            "search_movie",
+            {"keyword": keyword, "page": page},
+        )
+
+        if not raw_result:
+            error_info = get_kinopoisk_last_error()
+            if error_info:
+                _, error_msg = error_info
+                await update.message.reply_text(f"❌ Ошибка при вызове MCP Kinopoisk:\n{error_msg}")
+            else:
+                await update.message.reply_text(
+                    "❌ Не удалось получить результаты поиска от MCP Kinopoisk."
+                )
+            return
+
+        # Логируем сырой ответ MCP Kinopoisk (с обрезкой, чтобы не раздуть логи)
+        logger.info(
+            "Raw MCP Kinopoisk response for keyword=%r, page=%s: %s",
+            keyword,
+            page,
+            str(raw_result)[:2000],
+        )
+
+        # Пытаемся распарсить JSON-ответ
+        try:
+            data = json.loads(raw_result)
+        except Exception:
+            # Логируем полный (но обрезанный) сырой ответ при ошибке парсинга
+            logger.error(
+                "Не удалось распарсить JSON от MCP Kinopoisk. raw_result=%s",
+                str(raw_result)[:2000],
+                exc_info=True,
+            )
+            # Если формат неожиданный — просто выводим часть сырого ответа
+            await update.message.reply_text(
+                "⚠️ Не удалось распарсить ответ как JSON. Показываю сырой ответ:\n\n"
+                f"{str(raw_result)[:3500]}"
+            )
+            return
+
+        # В ответе Кинопоиска обычно есть список фильмов в полях films / items / results
+        films = (
+            data.get("films")
+            or data.get("items")
+            or data.get("results")
+            or []
+        )
+
+        if not films:
+            # Логируем случай, когда фильмов нет, но ответ формально корректный
+            logger.info(
+                "По запросу к MCP Kinopoisk ничего не найдено. keyword=%r, page=%s, raw_result=%s",
+                keyword,
+                page,
+                str(raw_result)[:2000],
+            )
+            await update.message.reply_text("Ничего не найдено по этому запросу 😔")
+            return
+
+        # Формируем компактный список (топ-5 результатов)
+        from html import escape
+
+        lines = ["📽 <b>Результаты поиска</b>:\n"]
+
+        for i, film in enumerate(films[:5], 1):
+            if not isinstance(film, dict):
+                continue
+            title = (
+                film.get("nameRu")
+                or film.get("nameEn")
+                or film.get("nameOriginal")
+                or film.get("name")
+                or "Без названия"
+            )
+            year = film.get("year") or ""
+            rating = (
+                film.get("ratingKinopoisk")
+                or film.get("ratingImdb")
+                or film.get("rating")
+                or ""
+            )
+            film_id = (
+                film.get("filmId")
+                or film.get("kinopoiskId")
+                or film.get("id")
+            )
+            description = (
+                film.get("description")
+                or film.get("shortDescription")
+                or ""
+            )
+
+            title_e = escape(str(title))
+            year_e = escape(str(year)) if year else ""
+            rating_e = escape(str(rating)) if rating else ""
+            id_e = escape(str(film_id)) if film_id is not None else ""
+            desc_e = escape(str(description)) if description else ""
+
+            line = f"{i}. <b>{title_e}</b>"
+            if year_e:
+                line += f" ({year_e})"
+            if rating_e:
+                line += f" — рейтинг: {rating_e}"
+            if id_e:
+                line += f" — ID: <code>{id_e}</code>"
+            if desc_e:
+                # Краткое описание на следующей строке
+                max_len = 200
+                short_desc = desc_e if len(desc_e) <= max_len else desc_e[: max_len - 1] + "…"
+                line += f"\n    {short_desc}"
+
+            lines.append(line)
+
+        # Кнопка "Следующая" для перехода на следующую страницу
+        next_page = page + 1
+        callback_data = f"kp_search:{keyword}:{next_page}"
+        keyboard = [[InlineKeyboardButton("Следующая", callback_data=callback_data)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        message = "\n".join(lines)
+        await update.message.reply_text(message, parse_mode="HTML", reply_markup=reply_markup)
+
+    except Exception as e:
+        logger.error(f"Ошибка при выполнении команды /kp_search: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ Произошла ошибка при поиске фильмов:\n{str(e)}"
+        )
+
+
+async def kp_search_pagination_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Callback для листания результатов /kp_search по страницам."""
+    from mcp_kinopoisk_client import call_kinopoisk_tool, get_kinopoisk_last_error
+
+    query = update.callback_query
+    if query is None:
+        return
+
+    data = query.data or ""
+    if not data.startswith("kp_search:"):
+        return
+
+    await query.answer()
+
+    try:
+        _, keyword, page_str = data.split(":", 2)
+    except ValueError:
+        logger.error("Некорректный формат callback_data для kp_search: %r", data)
+        return
+
+    try:
+        page = int(page_str)
+    except ValueError:
+        page = 1
+
+    chat_id = query.message.chat_id if query.message else update.effective_chat.id
+
+    try:
+        raw_result = await call_kinopoisk_tool(
+            "search_movie",
+            {"keyword": keyword, "page": page},
+        )
+
+        if not raw_result:
+            error_info = get_kinopoisk_last_error()
+            if error_info:
+                _, error_msg = error_info
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text=f"❌ Ошибка при вызове MCP Kinopoisk:\n{error_msg}",
+                )
+            else:
+                await context.bot.send_message(
+                    chat_id=chat_id,
+                    text="❌ Не удалось получить результаты поиска от MCP Kinopoisk.",
+                )
+            return
+
+        logger.info(
+            "Raw MCP Kinopoisk response (callback) for keyword=%r, page=%s: %s",
+            keyword,
+            page,
+            str(raw_result)[:2000],
+        )
+
+        # Пытаемся распарсить JSON-ответ
+        try:
+            data = json.loads(raw_result)
+        except Exception:
+            logger.error(
+                "Не удалось распарсить JSON от MCP Kinopoisk (callback). raw_result=%s",
+                str(raw_result)[:2000],
+                exc_info=True,
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=(
+                    "⚠️ Не удалось распарсить ответ как JSON. "
+                    "Показываю сырой ответ:\n\n"
+                    f"{str(raw_result)[:3500]}"
+                ),
+            )
+            return
+
+        # В ответе Кинопоиска обычно есть список фильмов в полях films / items / results
+        films = (
+            data.get("films")
+            or data.get("items")
+            or data.get("results")
+            or []
+        )
+
+        if not films:
+            logger.info(
+                "По запросу к MCP Kinopoisk (callback) ничего не найдено. "
+                "keyword=%r, page=%s, raw_result=%s",
+                keyword,
+                page,
+                str(raw_result)[:2000],
+            )
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text="Ничего не найдено по этому запросу 😔",
+            )
+            return
+
+        # Формируем компактный список (топ-5 результатов)
+        from html import escape
+
+        lines = ["📽 <b>Результаты поиска</b>:\n"]
+
+        for i, film in enumerate(films[:5], 1):
+            if not isinstance(film, dict):
+                continue
+            title = (
+                film.get("nameRu")
+                or film.get("nameEn")
+                or film.get("nameOriginal")
+                or film.get("name")
+                or "Без названия"
+            )
+            year = film.get("year") or ""
+            rating = (
+                film.get("ratingKinopoisk")
+                or film.get("ratingImdb")
+                or film.get("rating")
+                or ""
+            )
+            film_id = (
+                film.get("filmId")
+                or film.get("kinopoiskId")
+                or film.get("id")
+            )
+            description = (
+                film.get("description")
+                or film.get("shortDescription")
+                or ""
+            )
+
+            title_e = escape(str(title))
+            year_e = escape(str(year)) if year else ""
+            rating_e = escape(str(rating)) if rating else ""
+            id_e = escape(str(film_id)) if film_id is not None else ""
+            desc_e = escape(str(description)) if description else ""
+
+            line = f"{i}. <b>{title_e}</b>"
+            if year_e:
+                line += f" ({year_e})"
+            if rating_e:
+                line += f" — рейтинг: {rating_e}"
+            if id_e:
+                line += f" — ID: <code>{id_e}</code>"
+            if desc_e:
+                max_len = 200
+                short_desc = desc_e if len(desc_e) <= max_len else desc_e[: max_len - 1] + "…"
+                line += f"\n    {short_desc}"
+
+            lines.append(line)
+
+        # Кнопка "Следующая" для перехода на следующую страницу
+        next_page = page + 1
+        callback_next = f"kp_search:{keyword}:{next_page}"
+        keyboard = [[InlineKeyboardButton("Следующая", callback_data=callback_next)]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        message = "\n".join(lines)
+
+        # Обновляем существующее сообщение, если оно есть, иначе отправляем новое
+        if query.message:
+            await query.message.edit_text(
+                message,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=message,
+                parse_mode="HTML",
+                reply_markup=reply_markup,
+            )
+
+    except Exception as e:
+        logger.error(
+            "Ошибка при обработке callback пагинации /kp_search: %s",
+            e,
+            exc_info=True,
+        )
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"❌ Произошла ошибка при поиске фильмов:\n{str(e)}",
         )
