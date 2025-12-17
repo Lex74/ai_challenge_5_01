@@ -4,6 +4,7 @@ from typing import List, Dict, Any, Optional
 
 from mcp_client import list_notion_tools, call_notion_tool
 from mcp_kinopoisk_client import list_kinopoisk_tools, call_kinopoisk_tool
+from mcp_news_client import list_news_tools, call_news_tool
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,16 @@ def _convert_mcp_tool_to_openai_format(mcp_tool: Dict[str, Any], server_prefix: 
             description = f"Используй этот инструмент для получения подборок фильмов по тематике или настроению. {description}"
         elif "detail" in name.lower() or "детали" in description.lower() or "информация" in description.lower():
             description = f"Используй этот инструмент для получения подробной информации о конкретном фильме по его ID. {description}"
+    
+    # Улучшаем описание для News инструментов
+    if server_prefix == "news":
+        if "news" in name.lower() or "новости" in description.lower() or "новость" in description.lower() or "get_today" in name.lower():
+            description = (
+                "ОБЯЗАТЕЛЬНО используй этот инструмент, когда пользователь спрашивает о новостях, текущих событиях, "
+                "актуальной информации или последних новостях. Этот инструмент получает СВЕЖИЕ новости за последние 1-2 дня "
+                "из реальных источников через NewsAPI. НИКОГДА не говори пользователю, что у тебя нет доступа к новостям - "
+                f"всегда используй этот инструмент! {description}"
+            )
     
     # Преобразуем inputSchema в parameters для OpenAI
     properties = input_schema.get('properties', {}) if isinstance(input_schema, dict) else {}
@@ -103,6 +114,22 @@ async def get_all_mcp_tools() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.warning(f"Не удалось получить инструменты Kinopoisk MCP: {e}", exc_info=True)
     
+    # Получаем инструменты News
+    try:
+        news_tools = await list_news_tools()
+        logger.info(f"Получено {len(news_tools)} инструментов News MCP")
+        if news_tools:
+            for tool in news_tools:
+                tool_name = tool.get('name', 'unknown')
+                logger.info(f"Обрабатываю News инструмент: {tool_name}")
+                openai_tool = _convert_mcp_tool_to_openai_format(tool, "news")
+                openai_tools.append(openai_tool)
+                logger.info(f"News инструмент {tool_name} преобразован в OpenAI формат как news_{tool_name}")
+        else:
+            logger.warning("Список инструментов News MCP пуст. Проверьте настройки NEWS_API_KEY и путь к серверу.")
+    except Exception as e:
+        logger.error(f"Не удалось получить инструменты News MCP: {e}", exc_info=True)
+    
     # Кэшируем результат
     _cached_tools = openai_tools
     logger.info(f"Всего доступно {len(openai_tools)} MCP инструментов для LLM")
@@ -144,8 +171,13 @@ async def call_mcp_tool(tool_name: str, arguments: Dict[str, Any]) -> Optional[s
             result = await call_kinopoisk_tool(actual_tool_name, arguments)
             logger.info(f"Kinopoisk MCP инструмент {actual_tool_name} вернул результат (длина: {len(str(result)) if result else 0})")
             return result
+        elif server_prefix == "news":
+            logger.info(f"Вызываю News MCP инструмент: {actual_tool_name}")
+            result = await call_news_tool(actual_tool_name, arguments)
+            logger.info(f"News MCP инструмент {actual_tool_name} вернул результат (длина: {len(str(result)) if result else 0})")
+            return result
         else:
-            logger.error(f"Неизвестный префикс сервера: {server_prefix}. Ожидается 'notion' или 'kinopoisk'")
+            logger.error(f"Неизвестный префикс сервера: {server_prefix}. Ожидается 'notion', 'kinopoisk' или 'news'")
             return None
     except Exception as e:
         logger.error(f"Ошибка при вызове MCP инструмента {tool_name}: {e}", exc_info=True)

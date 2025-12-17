@@ -61,6 +61,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mcp_tools = context.bot_data.get('mcp_tools', [])
         if mcp_tools:
             logger.debug(f"Используется {len(mcp_tools)} MCP инструментов из bot_data")
+            # Проверяем наличие News инструментов
+            news_tools_available = [t for t in mcp_tools if t.get('function', {}).get('name', '').startswith('news_')]
+            if news_tools_available:
+                logger.info(f"Доступно {len(news_tools_available)} News инструментов для использования")
+            else:
+                logger.warning("News инструменты не найдены в списке доступных MCP инструментов")
+        
+        # Проверяем, спрашивает ли пользователь о новостях
+        news_keywords = ['новости', 'новость', 'события', 'событие', 'актуально', 'последнее', 'свежее', 
+                        'сегодня', 'вчера', 'происходит', 'случилось', 'произошло', 'что нового']
+        user_message_lower_for_news = user_message.lower()
+        is_news_question = any(keyword in user_message_lower_for_news for keyword in news_keywords)
+        
+        if is_news_question and mcp_tools:
+            news_tools_available = [t for t in mcp_tools if t.get('function', {}).get('name', '').startswith('news_')]
+            if news_tools_available:
+                logger.info(f"Обнаружен вопрос о новостях. Доступно {len(news_tools_available)} News инструментов")
         
         # Формируем полную историю: summary (если есть) + recent_messages
         # Если есть summary, объединяем его с системным промптом
@@ -70,17 +87,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Добавляем информацию о доступных MCP инструментах в системный промпт
         if mcp_tools:
-            tools_info = []
+            kinopoisk_tools_info = []
+            news_tools_info = []
             kinopoisk_tools_count = 0
+            news_tools_count = 0
+            
             for tool in mcp_tools:
                 tool_func = tool.get('function', {})
                 tool_name = tool_func.get('name', '')
                 tool_desc = tool_func.get('description', '')
                 if tool_name.startswith('kinopoisk_'):
-                    tools_info.append(f"- {tool_name}: {tool_desc}")
+                    kinopoisk_tools_info.append(f"- {tool_name}: {tool_desc}")
                     kinopoisk_tools_count += 1
+                elif tool_name.startswith('news_'):
+                    news_tools_info.append(f"- {tool_name}: {tool_desc}")
+                    news_tools_count += 1
             
-            if tools_info and kinopoisk_tools_count > 0:
+            # Добавляем информацию о Kinopoisk инструментах
+            if kinopoisk_tools_info and kinopoisk_tools_count > 0:
                 tools_prompt = (
                     "\n\n"
                     "КРИТИЧЕСКИ ВАЖНО: У тебя есть доступ к инструментам Kinopoisk для поиска актуальной информации о фильмах. "
@@ -88,16 +112,58 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "ТЫ ОБЯЗАН использовать доступные инструменты Kinopoisk. "
                     "НИКОГДА не говори, что у тебя нет информации о фильмах - всегда используй инструменты для получения актуальных данных. "
                     f"Доступно {kinopoisk_tools_count} инструмент(ов) Kinopoisk:\n" + 
-                    "\n".join(tools_info) +
+                    "\n".join(kinopoisk_tools_info) +
                     "\n\nИспользуй эти инструменты автоматически, когда пользователь спрашивает о фильмах!"
                 )
                 full_system_prompt += tools_prompt
+            
+            # Добавляем информацию о News инструментах
+            if news_tools_info and news_tools_count > 0:
+                news_prompt = (
+                    "\n\n"
+                    "⚠️ КРИТИЧЕСКИ ВАЖНО - ИНСТРУКЦИИ ПО ИСПОЛЬЗОВАНИЮ ИНСТРУМЕНТОВ NEWS:\n\n"
+                    "У тебя ЕСТЬ доступ к инструментам News для получения СВЕЖИХ новостей в реальном времени!\n\n"
+                    "ЗАПРЕЩЕНО говорить пользователю, что у тебя нет доступа к новостям или интернету. "
+                    "Это НЕПРАВДА - у тебя ЕСТЬ доступ через инструменты News!\n\n"
+                    "ОБЯЗАТЕЛЬНО используй инструменты News, если пользователь:\n"
+                    "- Спрашивает о новостях, текущих событиях, актуальной информации\n"
+                    "- Интересуется последними событиями в мире, политике, технологиях, экономике, спорте\n"
+                    "- Просит рассказать о чем-то актуальном, свежем, последнем\n"
+                    "- Использует слова: новости, события, актуально, последнее, свежее, сегодня, вчера\n\n"
+                    "АЛГОРИТМ ДЕЙСТВИЙ:\n"
+                    "1. Когда пользователь спрашивает о новостях - СРАЗУ вызывай инструмент News\n"
+                    "2. Извлекай ключевые слова из вопроса пользователя для параметра 'query'\n"
+                    "3. Если пользователь не указал язык, используй 'ru' для русскоязычных запросов\n"
+                    "4. Получив результаты, сформируй краткое саммари новостей для пользователя\n\n"
+                    f"Доступно {news_tools_count} инструмент(ов) News:\n" + 
+                    "\n".join(news_tools_info) +
+                    "\n\n"
+                    "ПРИМЕРЫ:\n"
+                    "- Пользователь: 'Какие новости о технологиях?' → Вызывай news_get_today_news с query='технологии', language='ru'\n"
+                    "- Пользователь: 'Что происходит в мире?' → Вызывай news_get_today_news с query='мир', language='ru'\n"
+                    "- Пользователь: 'Расскажи новости' → Вызывай news_get_today_news с query='новости', language='ru'\n\n"
+                    "ПОМНИ: НИКОГДА не говори, что не можешь получить новости. ВСЕГДА используй инструменты!"
+                )
+                full_system_prompt += news_prompt
         
         full_conversation_history = recent_messages.copy()
         
+        # Если это вопрос о новостях и есть News инструменты, добавляем явное указание в сообщение
+        enhanced_user_message = user_message
+        if is_news_question and mcp_tools:
+            news_tools_available = [t for t in mcp_tools if t.get('function', {}).get('name', '').startswith('news_')]
+            if news_tools_available:
+                # Добавляем явное указание использовать инструмент News
+                enhanced_user_message = (
+                    f"{user_message}\n\n"
+                    "ВАЖНО: Используй доступный инструмент News для получения актуальных новостей. "
+                    "НЕ говори, что у тебя нет доступа к новостям - используй инструмент!"
+                )
+                logger.info("Добавлено явное указание использовать News инструмент в запросе пользователя")
+        
         # Получаем ответ от OpenAI с полной историей диалога и MCP инструментами
         answer, updated_history = await query_openai(
-            user_message,
+            enhanced_user_message,
             full_conversation_history,
             full_system_prompt,
             temperature,

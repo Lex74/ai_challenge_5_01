@@ -77,7 +77,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/getmaxtokens - показать текущее максимальное количество токенов\n"
         "/resetmaxtokens - сбросить к дефолтному значению (1000)\n\n"
         "/notion_tools - показать список доступных инструментов Notion\n"
-        "/kinopoisk_tools - показать список доступных инструментов Kinopoisk MCP\n\n"
+        "/kinopoisk_tools - показать список доступных инструментов Kinopoisk MCP\n"
+        "/news_tools - показать список доступных инструментов News MCP\n\n"
         "Температура влияет на креативность ответов (диапазон: 0.0-2.0)"
     )
 
@@ -536,6 +537,74 @@ async def kinopoisk_tools_command(update: Update, context: ContextTypes.DEFAULT_
         logger.error(f"Ошибка при выполнении команды /kinopoisk_tools: {e}")
         await update.message.reply_text(
             f"❌ Произошла ошибка при получении списка инструментов Kinopoisk:\n{str(e)}"
+        )
+
+
+async def news_tools_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /news_tools для вывода списка инструментов News MCP"""
+    logger.info(
+        "Пользователь %s запросил использование MCP News (list_news_tools)",
+        update.effective_user.id,
+    )
+    await update.message.reply_text("🔍 Получаю список инструментов News...")
+    
+    try:
+        from mcp_news_client import list_news_tools, get_news_last_error
+        
+        tools = await list_news_tools()
+        
+        if not tools:
+            error_info = get_news_last_error()
+            error_msg = _handle_tools_command_error(
+                error_info,
+                "❌ Не удалось получить список инструментов News.\n\n"
+                "Возможные причины:\n"
+                "• MCP сервер News не найден или не запускается\n"
+                "• Неверно указан путь в MCP_NEWS_ARGS\n"
+                "• Не указан NEWS_API_KEY\n\n"
+                "Проверьте логи для получения дополнительной информации."
+            )
+            await update.message.reply_text(error_msg)
+            return
+        
+        # Форматируем список инструментов
+        full_message = format_tools_list(tools, "News MCP")
+        
+        # Разбиваем на части, если нужно
+        message_parts = split_long_message(full_message)
+        for part in message_parts:
+            await update.message.reply_text(part, parse_mode='HTML')
+        
+        logger.info(
+            f"Пользователь {update.effective_user.id} запросил список инструментов News MCP, "
+            f"получено {len(tools)} инструментов"
+        )
+    
+    except ImportError as e:
+        error_msg = str(e)
+        if 'mcp' in error_msg:
+            logger.error(f"Ошибка импорта mcp: {e}")
+            await update.message.reply_text(
+                "❌ Библиотека mcp не установлена.\n\n"
+                "Для установки выполните:\n"
+                "```\n"
+                "pip install mcp\n"
+                "```\n\n"
+                "Или установите все зависимости:\n"
+                "```\n"
+                "pip install -r requirements.txt\n"
+                "```"
+            )
+        else:
+            logger.error(f"Ошибка импорта mcp_news_client: {e}")
+            await update.message.reply_text(
+                f"❌ Ошибка импорта: {e}\n\n"
+                "Установите зависимости: pip install -r requirements.txt"
+            )
+    except Exception as e:
+        logger.error(f"Ошибка при выполнении команды /news_tools: {e}")
+        await update.message.reply_text(
+            f"❌ Произошла ошибка при получении списка инструментов News:\n{str(e)}"
         )
 
 

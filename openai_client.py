@@ -151,7 +151,13 @@ async def query_openai(
         logger.info(f"Передано {len(tools)} инструментов в OpenAI API для function calling")
         # Логируем названия инструментов для отладки
         tool_names = [t.get('function', {}).get('name', 'unknown') for t in tools]
-        logger.debug(f"Доступные инструменты: {', '.join(tool_names)}")
+        logger.info(f"Доступные инструменты: {', '.join(tool_names)}")
+        # Проверяем наличие News инструментов
+        news_tools = [name for name in tool_names if name.startswith('news_')]
+        if news_tools:
+            logger.info(f"⚠️ News инструменты доступны: {', '.join(news_tools)}")
+        else:
+            logger.warning("⚠️ News инструменты НЕ найдены в списке доступных инструментов!")
     
     if model.startswith("gpt-5"):
         payload["max_completion_tokens"] = max_tokens

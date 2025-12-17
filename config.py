@@ -10,8 +10,10 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 OPENAI_API_URL = 'https://api.openai.com/v1/chat/completions'
 
-# Admin User ID для отправки логов
+# Admin User ID для отправки логов и ежедневной рассылки новостей
 ADMIN_USER_ID = os.getenv('ADMIN_USER_ID')
+if ADMIN_USER_ID:
+    ADMIN_USER_ID = int(ADMIN_USER_ID)
 
 # MCP Server Configuration
 # Согласно официальной документации: https://developers.notion.com/docs/get-started-with-mcp
@@ -29,6 +31,29 @@ MCP_KINOPOISK_ARGS = (
     ).split()
     if os.getenv('MCP_KINOPOISK_ARGS')
     else ['../kinopoisk-mcp/mcp_server.py']
+)
+
+# Локальный MCP сервер News (Python)
+# Используем Python из виртуального окружения news-mcp, если оно есть
+# Иначе используем системный python3
+# Вычисляем абсолютный путь относительно текущего файла
+_config_dir = os.path.dirname(os.path.abspath(__file__))
+_news_mcp_venv_python = os.path.abspath(os.path.join(_config_dir, '..', 'news-mcp', 'venv', 'bin', 'python3'))
+_news_mcp_server = os.path.abspath(os.path.join(_config_dir, '..', 'news-mcp', 'server.py'))
+
+# Проверяем существование venv, если нет - используем системный python3
+# На VPS без venv будет использоваться системный python3
+if os.path.exists(_news_mcp_venv_python):
+    _default_news_command = _news_mcp_venv_python
+else:
+    # Используем системный python3
+    _default_news_command = 'python3'
+
+MCP_NEWS_COMMAND = os.getenv('MCP_NEWS_COMMAND', _default_news_command)
+MCP_NEWS_ARGS = (
+    os.getenv('MCP_NEWS_ARGS', _news_mcp_server).split()
+    if os.getenv('MCP_NEWS_ARGS')
+    else [_news_mcp_server]
 )
 
 # Проверка наличия обязательных переменных
