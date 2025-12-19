@@ -1,5 +1,7 @@
 """Обработчик текстовых сообщений"""
 import logging
+from datetime import datetime
+from typing import Optional
 
 from telegram import Update
 from telegram.ext import ContextTypes
@@ -20,8 +22,221 @@ from utils import (
     remove_source_numbers,
     convert_markdown_to_telegram,
 )
+from config import NOTION_NEWS_PAGE_ID
 
 logger = logging.getLogger(__name__)
+
+
+async def create_news_summary(news_text: str, model: str, bot) -> Optional[str]:
+    """Создает саммари новостей используя ту же логику, что и для ежедневной рассылки"""
+    from openai_client import query_openai
+    
+    system_prompt = (
+        "Ты профессиональный ведущий новостей. Создай краткое саммари новостей в стиле "
+        "вступительного слова ведущего новостей. Начни с приветствия и краткого обзора основных событий. "
+        "Структурируй информацию по темам, выдели самые важные новости. "
+        "Будь кратким, но информативным. Используй профессиональный, но понятный язык. "
+        "Используй формат Markdown для заголовков и списков. "
+        "В конце добавь фразу вроде 'Это были основные новости дня. Хорошего дня!'"
+    )
+    
+    user_prompt = (
+        f"Создай краткое саммари новостей в стиле ведущего новостей на основе следующей информации:\n\n"
+        f"{news_text}\n\n"
+        f"Создай профессиональное вступительное слово ведущего новостей."
+    )
+    
+    logger.info("Создаю саммари новостей с помощью OpenAI...")
+    summary, _ = await query_openai(
+        user_prompt,
+        [],
+        system_prompt,
+        temperature=0.7,
+        model=model,
+        max_tokens=2000,
+        bot=bot,
+        tools=None
+    )
+    
+    if summary:
+        logger.info(f"Создано саммари новостей длиной {len(summary)} символов")
+        return summary
+    else:
+        logger.error("Не удалось создать саммари новостей")
+        return None
+
+
+async def save_news_to_notion(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Получает новости из News MCP, создает саммари и сохраняет в Notion
+    
+    Returns:
+        bool: True если успешно, False если ошибка
+    """
+    from mcp_news_client import call_news_tool
+    from mcp_client import call_notion_tool, list_notion_tools
+    
+    try:
+        # Шаг 1: Получаем новости из News MCP
+        await update.message.reply_text("📰 Получаю свежие новости...")
+        logger.info("Получаю новости из News MCP")
+        
+        news_result = await call_news_tool("get_today_news", {
+            "query": "новости",
+            "language": "ru",
+            "page_size": 10,
+            "sort_by": "publishedAt"
+        })
+        
+        if not news_result:
+            await update.message.reply_text(
+                "❌ Не удалось получить новости. Проверьте настройки NEWS_API_KEY."
+            )
+            return False
+        
+        # News MCP возвращает текстовый формат, а не JSON
+        # Проверяем, что есть новости
+        if not news_result.strip():
+            await update.message.reply_text("📰 Новости не найдены.")
+            return False
+        
+        # Шаг 2: Создаем саммари новостей через OpenAI
+        await update.message.reply_text("✍️ Создаю саммари новостей...")
+        logger.info("Создаю саммари новостей")
+        
+        # Получаем модель из user_data или используем дефолтную
+        model = context.user_data.get('model', DEFAULT_MODEL)
+        
+        # Используем существующую функцию для создания саммари
+        summary = await create_news_summary(news_result, model, context.bot)
+        
+        if not summary:
+            await update.message.reply_text("❌ Не удалось создать саммари новостей.")
+            return False
+        
+        # Шаг 3: Сохраняем саммари в Notion через Notion MCP
+        await update.message.reply_text("💾 Сохраняю в Notion...")
+        logger.info("Сохраняю саммари в Notion")
+        
+        # Получаем доступные инструменты Notion
+        notion_tools = await list_notion_tools()
+        if not notion_tools:
+            await update.message.reply_text(
+                "❌ Не удалось получить инструменты Notion. Проверьте настройки MCP_NOTION_COMMAND."
+            )
+            return False
+        
+        # Ищем инструмент для создания страницы
+        # Обычно это create_page или append_block
+        tool_names = [tool.get('name', '') for tool in notion_tools]
+        logger.info(f"Доступные инструменты Notion: {', '.join(tool_names)}")
+        
+        # Пробуем использовать create_page или похожий инструмент
+        create_page_tool = None
+        for tool_name in ['create_page', 'createPage', 'append_block', 'appendBlock']:
+            if tool_name in tool_names:
+                create_page_tool = tool_name
+                break
+        
+        if not create_page_tool:
+            # Если нет явного инструмента, используем LLM с доступными инструментами
+            logger.info("Используем LLM для создания страницы в Notion")
+            mcp_tools = context.bot_data.get('mcp_tools', [])
+            notion_tools_for_llm = [t for t in mcp_tools if t.get('function', {}).get('name', '').startswith('notion_')]
+            
+            if not notion_tools_for_llm:
+                await update.message.reply_text(
+                    "❌ Не найдены инструменты Notion для создания страницы."
+                )
+                return False
+            
+            # Используем LLM для создания страницы
+            # Форматируем page_id в формат с дефисами для Notion API (если нужно)
+            # Notion API использует формат: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
+            # Но в URL может быть без дефисов: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+            news_page_id = NOTION_NEWS_PAGE_ID
+            # Если page_id без дефисов (32 символа), добавляем дефисы
+            if len(news_page_id) == 32 and '-' not in news_page_id:
+                news_page_id = f"{news_page_id[:8]}-{news_page_id[8:12]}-{news_page_id[12:16]}-{news_page_id[16:20]}-{news_page_id[20:]}"
+            
+            notion_prompt = (
+                f"Создай новую страницу в Notion со следующим содержимым:\n\n"
+                f"Заголовок: Саммари новостей от {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                f"Содержимое:\n{summary}\n\n"
+                f"ВАЖНО: Страницу нужно создать внутри страницы 'Новости' в Notion. "
+                f"Используй page_id страницы 'Новости': {news_page_id} "
+                f"в параметре parent при создании страницы через notion-create-pages. "
+                f"Параметр parent должен быть объектом: {{'page_id': '{news_page_id}'}}."
+            )
+            
+            # Получаем температуру и модель
+            temperature = context.user_data.get('temperature', DEFAULT_TEMPERATURE)
+            
+            # Системный промпт с подробными инструкциями
+            system_prompt = (
+                "Ты помощник, который создает страницы в Notion. "
+                "КРИТИЧЕСКИ ВАЖНО: Для создания страницы в Notion через notion-create-pages ОБЯЗАТЕЛЬНО нужно указать параметр 'parent' "
+                "с одним из полей: 'page_id', 'database_id' или 'data_source_id'. "
+                f"Используй page_id страницы 'Новости': {news_page_id}. "
+                "Структура параметра parent должна быть объектом: {'page_id': 'указанный_page_id'}. "
+                "Используй доступные инструменты Notion для создания новой страницы с предоставленным содержимым внутри страницы 'Новости'. "
+                "НЕ ищи страницу через search - используй предоставленный page_id напрямую."
+            )
+            
+            # Вызываем LLM с Notion инструментами
+            answer, _ = await query_openai(
+                notion_prompt,
+                [],
+                system_prompt,
+                temperature,
+                model,
+                MAX_TOKENS,
+                context.bot,
+                tools=notion_tools_for_llm
+            )
+            
+            if "ошибка" in answer.lower() or "не удалось" in answer.lower():
+                await update.message.reply_text(
+                    f"❌ Ошибка при создании страницы в Notion: {answer}"
+                )
+                return False
+            
+            await update.message.reply_text(
+                f"✅ Саммари новостей успешно сохранено в Notion!\n\n"
+                f"📄 {answer}"
+            )
+            return True
+        else:
+            # Используем явный инструмент для создания страницы
+            page_title = f"Саммари новостей от {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            page_content = f"# {page_title}\n\n{summary}"
+            
+            # Формируем аргументы для создания страницы
+            # Структура зависит от конкретного инструмента Notion MCP
+            arguments = {
+                "title": page_title,
+                "content": page_content
+            }
+            
+            result = await call_notion_tool(create_page_tool, arguments)
+            
+            if not result:
+                await update.message.reply_text(
+                    "❌ Не удалось создать страницу в Notion."
+                )
+                return False
+            
+            await update.message.reply_text(
+                f"✅ Саммари новостей успешно сохранено в Notion!\n\n"
+                f"📄 Страница создана: {page_title}"
+            )
+            return True
+            
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении новостей в Notion: {e}", exc_info=True)
+        await update.message.reply_text(
+            f"❌ Произошла ошибка: {str(e)}"
+        )
+        return False
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -42,6 +257,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_memory(user_id)
         logger.info("Пользователь запросил сброс истории диалога")
         await update.message.reply_text("Хорошо, тогда начнём с начала! 🎯")
+        return
+    
+    # Проверяем, хочет ли пользователь сохранить новости в Notion
+    save_news_keywords = ['сохрани новости в заметки', 'сохрани новости в notion', 
+                         'сохрани новости', 'новости в заметки', 'новости в notion']
+    if any(keyword in user_message_lower for keyword in save_news_keywords):
+        logger.info(f"Пользователь {user_id} запросил сохранение новостей в Notion")
+        success = await save_news_to_notion(update, context)
+        if success:
+            logger.info(f"Успешно сохранены новости в Notion для пользователя {user_id}")
         return
     
     # Отправляем сообщение о том, что бот думает

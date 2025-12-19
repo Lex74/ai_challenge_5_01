@@ -56,6 +56,11 @@ MCP_NEWS_ARGS = (
     else [_news_mcp_server]
 )
 
+# Notion страница для сохранения новостей
+# Page ID извлекается из URL: https://www.notion.so/2ceb45610e4e808984b8d8131d3ccc61
+# Формат: 2ceb45610e4e808984b8d8131d3ccc61 (без дефисов, как в URL)
+NOTION_NEWS_PAGE_ID = os.getenv('NOTION_NEWS_PAGE_ID', '2ceb45610e4e808984b8d8131d3ccc61')
+
 # Проверка наличия обязательных переменных
 if not TELEGRAM_BOT_TOKEN:
     raise ValueError("TELEGRAM_BOT_TOKEN не установлен в переменных окружения")

@@ -40,6 +40,22 @@ def _convert_mcp_tool_to_openai_format(mcp_tool: Dict[str, Any], server_prefix: 
                 f"всегда используй этот инструмент! {description}"
             )
     
+    # Улучшаем описание для Notion инструментов
+    if server_prefix == "notion":
+        if "create" in name.lower() and "page" in name.lower():
+            description = (
+                f"КРИТИЧЕСКИ ВАЖНО: Для создания страницы ОБЯЗАТЕЛЬНО нужно указать параметр 'parent' с одним из полей: "
+                f"'page_id', 'database_id' или 'data_source_id'. Если у тебя нет ID родительской страницы или базы данных, "
+                f"сначала используй notion-search для поиска. Структура parent: {{'page_id': '...'}} или {{'database_id': '...'}}. "
+                f"{description}"
+            )
+        elif "search" in name.lower():
+            description = (
+                f"Используй этот инструмент для поиска страниц, баз данных или других объектов в Notion. "
+                f"Результаты поиска содержат page_id или database_id, которые можно использовать в параметре parent "
+                f"при создании новых страниц через notion-create-pages. {description}"
+            )
+    
     # Преобразуем inputSchema в parameters для OpenAI
     properties = input_schema.get('properties', {}) if isinstance(input_schema, dict) else {}
     required = input_schema.get('required', []) if isinstance(input_schema, dict) else []
@@ -69,14 +85,57 @@ def _convert_mcp_tool_to_openai_format(mcp_tool: Dict[str, Any], server_prefix: 
             if param_type not in ['string', 'number', 'integer', 'boolean', 'array', 'object']:
                 param_type = 'string'
             
-            openai_tool["function"]["parameters"]["properties"][param_name] = {
+            param_schema = {
                 "type": param_type,
                 "description": param_desc
             }
             
+            # Для массивов OpenAI требует указать items
+            if param_type == 'array':
+                items_schema = param_info.get('items', {})
+                if isinstance(items_schema, dict):
+                    items_type = items_schema.get('type', 'string')
+                    # OpenAI поддерживает только простые типы в items для массивов
+                    if items_type not in ['string', 'number', 'integer', 'boolean']:
+                        items_type = 'string'
+                    param_schema["items"] = {"type": items_type}
+                    # Если есть описание для items, добавляем его
+                    if 'description' in items_schema:
+                        param_schema["items"]["description"] = items_schema['description']
+                else:
+                    # Если items не указан, используем string по умолчанию
+                    param_schema["items"] = {"type": "string"}
+            
+            # Для объектов обрабатываем вложенные свойства
+            elif param_type == 'object':
+                nested_properties = param_info.get('properties', {})
+                if nested_properties:
+                    param_schema["properties"] = {}
+                    for nested_name, nested_info in nested_properties.items():
+                        if isinstance(nested_info, dict):
+                            nested_type = nested_info.get('type', 'string')
+                            if nested_type not in ['string', 'number', 'integer', 'boolean', 'array', 'object']:
+                                nested_type = 'string'
+                            param_schema["properties"][nested_name] = {
+                                "type": nested_type,
+                                "description": nested_info.get('description', '')
+                            }
+                            # Для вложенных массивов тоже нужны items
+                            if nested_type == 'array':
+                                nested_items = nested_info.get('items', {})
+                                if isinstance(nested_items, dict):
+                                    nested_items_type = nested_items.get('type', 'string')
+                                    if nested_items_type not in ['string', 'number', 'integer', 'boolean']:
+                                        nested_items_type = 'string'
+                                    param_schema["properties"][nested_name]["items"] = {"type": nested_items_type}
+                                else:
+                                    param_schema["properties"][nested_name]["items"] = {"type": "string"}
+            
             # Если есть enum, добавляем его
             if 'enum' in param_info:
-                openai_tool["function"]["parameters"]["properties"][param_name]["enum"] = param_info['enum']
+                param_schema["enum"] = param_info['enum']
+            
+            openai_tool["function"]["parameters"]["properties"][param_name] = param_schema
     
     return openai_tool
 

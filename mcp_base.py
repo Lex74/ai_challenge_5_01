@@ -18,9 +18,9 @@ class BaseMCPClient:
         get_server_params_func: Callable[[], Tuple[Optional[StdioServerParameters], Optional[str]]],
         get_last_error_func: Callable[[], Optional[Tuple[str, str]]],
         set_last_error_func: Callable[[Optional[str], Optional[str]], None],
-        init_timeout: int = 20,
-        tools_timeout: int = 20,
-        call_timeout: int = 40,
+        init_timeout: Optional[int] = 20,
+        tools_timeout: Optional[int] = 20,
+        call_timeout: Optional[int] = 40,
     ):
         """
         Инициализация базового MCP клиента
@@ -96,7 +96,10 @@ class BaseMCPClient:
                 async with ClientSession(read, write) as session:
                     # Инициализируем сессию с таймаутом
                     try:
-                        await asyncio.wait_for(session.initialize(), timeout=self.init_timeout)
+                        if self.init_timeout is not None:
+                            await asyncio.wait_for(session.initialize(), timeout=self.init_timeout)
+                        else:
+                            await session.initialize()
                     except asyncio.TimeoutError:
                         error_msg = (
                             f"Тайм-аут при инициализации MCP сервера {self.server_name} "
@@ -110,9 +113,12 @@ class BaseMCPClient:
                     
                     # Получаем список инструментов из MCP сервера с таймаутом
                     try:
-                        tools_result = await asyncio.wait_for(
-                            session.list_tools(), timeout=self.tools_timeout
-                        )
+                        if self.tools_timeout is not None:
+                            tools_result = await asyncio.wait_for(
+                                session.list_tools(), timeout=self.tools_timeout
+                            )
+                        else:
+                            tools_result = await session.list_tools()
                     except asyncio.TimeoutError:
                         error_msg = (
                             f"Тайм-аут при получении списка инструментов от MCP сервера {self.server_name} "
@@ -182,7 +188,10 @@ class BaseMCPClient:
                 async with ClientSession(read, write) as session:
                     # Инициализация с таймаутом
                     try:
-                        await asyncio.wait_for(session.initialize(), timeout=self.init_timeout)
+                        if self.init_timeout is not None:
+                            await asyncio.wait_for(session.initialize(), timeout=self.init_timeout)
+                        else:
+                            await session.initialize()
                     except asyncio.TimeoutError:
                         error_msg = (
                             f"Тайм-аут при инициализации MCP сервера {self.server_name} "
@@ -196,10 +205,13 @@ class BaseMCPClient:
                     
                     # Вызов инструмента с таймаутом
                     try:
-                        tool_result = await asyncio.wait_for(
-                            session.call_tool(name=name, arguments=arguments),
-                            timeout=self.call_timeout,
-                        )
+                        if self.call_timeout is not None:
+                            tool_result = await asyncio.wait_for(
+                                session.call_tool(name=name, arguments=arguments),
+                                timeout=self.call_timeout,
+                            )
+                        else:
+                            tool_result = await session.call_tool(name=name, arguments=arguments)
                     except asyncio.TimeoutError:
                         error_msg = (
                             f"Тайм-аут при вызове инструмента '{name}' MCP сервера {self.server_name} "

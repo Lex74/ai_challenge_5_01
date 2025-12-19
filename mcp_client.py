@@ -137,8 +137,8 @@ _notion_client = BaseMCPClient(
     get_server_params_func=_get_server_params,
     get_last_error_func=get_last_error,
     set_last_error_func=_set_last_error,
-    init_timeout=20,
-    tools_timeout=20,
+    init_timeout=None,
+    tools_timeout=None,
     call_timeout=40,
 )
 
