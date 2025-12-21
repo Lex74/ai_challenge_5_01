@@ -46,10 +46,48 @@ def remove_source_numbers(text: str) -> str:
 
 def convert_markdown_to_telegram(text: str) -> str:
     """Преобразует markdown разметку в HTML форматирование для Telegram"""
-    # Экранируем специальные символы HTML
-    text = text.replace("&", "&amp;")
-    text = text.replace("<", "&lt;")
-    text = text.replace(">", "&gt;")
+    # Сначала обрабатываем code блоки (```...```)
+    code_block_pattern = r'```(?:[\w]*\n)?(.*?)```'
+    
+    # Временно заменяем code блоки на плейсхолдеры
+    code_blocks = []
+    placeholder_pattern = '___CODE_BLOCK_PLACEHOLDER_{}___'
+    
+    def save_code_block(match):
+        code_content = match.group(1)
+        # Экранируем HTML символы в содержимом code блока
+        code_content = code_content.replace("&", "&amp;")
+        code_content = code_content.replace("<", "&lt;")
+        code_content = code_content.replace(">", "&gt;")
+        # Обертываем в <pre> для моноширинного отображения
+        code_blocks.append(f'<pre>{code_content}</pre>')
+        return placeholder_pattern.format(len(code_blocks) - 1)
+    
+    text = re.sub(code_block_pattern, save_code_block, text, flags=re.DOTALL)
+    
+    # Восстанавливаем code блоки ДО экранирования остального текста
+    for i, code_block in enumerate(code_blocks):
+        text = text.replace(placeholder_pattern.format(i), code_block)
+    
+    # Теперь экранируем HTML символы только в тексте вне <pre> блоков
+    # Разбиваем на части: <pre>...</pre> и остальное
+    parts = re.split(r'(<pre>.*?</pre>)', text, flags=re.DOTALL)
+    result_parts = []
+    
+    for part in parts:
+        if part.startswith('<pre>') and part.endswith('</pre>'):
+            # Это code блок, оставляем как есть (уже экранирован)
+            result_parts.append(part)
+        else:
+            # Это обычный текст, экранируем HTML символы
+            part = part.replace("&", "&amp;")
+            part = part.replace("<", "&lt;")
+            part = part.replace(">", "&gt;")
+            # Но нужно вернуть обратно <pre> теги, если они были экранированы
+            part = re.sub(r'&lt;pre&gt;(.*?)&lt;/pre&gt;', r'<pre>\1</pre>', part, flags=re.DOTALL)
+            result_parts.append(part)
+    
+    text = ''.join(result_parts)
     
     # Преобразуем ## текст в <u>текст</u> (подчёркнутый)
     # Обрабатываем строки, начинающиеся с ##
@@ -127,20 +165,23 @@ def split_long_message(message: str, max_length: int = 4000) -> List[str]:
     if len(message) <= max_length:
         return [message]
     
-    # Пытаемся разбить по строкам
+    # Простое разбиение по строкам, сохраняя форматирование
     lines = message.split('\n')
     parts = []
     current_part = ""
     
     for line in lines:
-        if len(current_part) + len(line) + 1 > max_length:
+        # Учитываем заголовок "Часть X из Y" (примерно 30 символов) при расчете
+        available_length = max_length - 50 if len(parts) > 0 else max_length
+        
+        if len(current_part) + len(line) + 1 > available_length:
             if current_part:
                 parts.append(current_part)
                 current_part = line
             else:
                 # Если одна строка слишком длинная, обрезаем её
-                parts.append(line[:max_length])
-                current_part = line[max_length:]
+                parts.append(line[:available_length])
+                current_part = line[available_length:]
         else:
             current_part += ('\n' if current_part else '') + line
     

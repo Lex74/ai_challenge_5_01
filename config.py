@@ -56,6 +56,18 @@ MCP_NEWS_ARGS = (
     else [_news_mcp_server]
 )
 
+# Локальный MCP сервер Logs (Python)
+# Вычисляем абсолютный путь относительно текущего файла
+_logs_mcp_server = os.path.abspath(os.path.join(_config_dir, '..', 'logs_mcp', 'server.py'))
+
+# Используем системный python3 по умолчанию
+MCP_LOGS_COMMAND = os.getenv('MCP_LOGS_COMMAND', 'python3')
+MCP_LOGS_ARGS = (
+    os.getenv('MCP_LOGS_ARGS', _logs_mcp_server).split()
+    if os.getenv('MCP_LOGS_ARGS')
+    else [_logs_mcp_server]
+)
+
 # Notion страница для сохранения новостей
 # Page ID извлекается из URL: https://www.notion.so/2ceb45610e4e808984b8d8131d3ccc61
 # Формат: 2ceb45610e4e808984b8d8131d3ccc61 (без дефисов, как в URL)

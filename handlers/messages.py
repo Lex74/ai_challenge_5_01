@@ -1,5 +1,6 @@
 """Обработчик текстовых сообщений"""
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -484,6 +485,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Удаляем номера источников из ответа
         answer = remove_source_numbers(answer)
         
+        # Проверяем, использовался ли logs инструмент в этом запросе
+        # Проверяем историю на наличие вызовов logs инструментов
+        logs_tool_used = False
+        if updated_history:
+            for msg in updated_history:
+                tool_name = msg.get("name", "")
+                if msg.get("role") == "tool" and tool_name.startswith("logs_"):
+                    logs_tool_used = True
+                    logger.info(f"Обнаружен вызов logs инструмента: {tool_name}")
+                    break
+        
+        # Если использовался logs инструмент, но в ответе нет code блоков, добавляем их
+        if logs_tool_used and "```" not in answer:
+            # Ищем паттерны логов (timestamp формата "Dec 19 06:59:56" или "MMM DD HH:MM:SS")
+            # Улучшенный паттерн для journalctl логов
+            log_pattern = r'([A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})'
+            if re.search(log_pattern, answer):
+                # Если ответ содержит логи, оборачиваем их в code блок
+                # Но сначала убираем возможные предисловия от LLM
+                lines = answer.split('\n')
+                log_start = None
+                for i, line in enumerate(lines):
+                    if re.search(log_pattern, line):
+                        log_start = i
+                        break
+                
+                if log_start is not None and log_start > 0:
+                    # Есть предисловие от LLM
+                    preface = '\n'.join(lines[:log_start])
+                    log_content = '\n'.join(lines[log_start:])
+                    answer = f"{preface}\n\n```\n{log_content}\n```"
+                elif log_start == 0:
+                    # Весь ответ - это логи
+                    answer = f"```\n{answer}\n```"
+            else:
+                # Если паттерн не найден, но logs инструмент использован, 
+                # значит весь ответ - это логи (LLM могла переформатировать)
+                logger.info("Logs инструмент использован, но паттерн логов не найден. Оборачиваю весь ответ в code блок.")
+                answer = f"```\n{answer}\n```"
+        
         # Преобразуем markdown в форматирование Telegram
         formatted_answer = convert_markdown_to_telegram(answer)
         
@@ -495,15 +536,86 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Получен пустой ответ от модели {model}")
             return
         
+        # Проверяем, содержит ли ответ логи (по наличию <pre> блоков или паттернов логов)
+        # Паттерн для определения логов: timestamp формата "Dec 19 06:59:56" или "MMM DD HH:MM:SS"
+        has_pre_tag = '<pre>' in formatted_answer
+        log_pattern = r'[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}'
+        has_log_pattern = bool(re.search(log_pattern, formatted_answer))
+        has_logs = has_pre_tag or has_log_pattern or logs_tool_used
+        
+        logger.info(f"Проверка логов: logs_tool_used={logs_tool_used}, has_pre_tag={has_pre_tag}, has_log_pattern={has_log_pattern}, has_logs={has_logs}, длина ответа={len(formatted_answer)}")
+        
+        # Если использовался logs инструмент, но нет <pre> блоков, значит LLM убрала форматирование
+        # В этом случае нужно найти логи в ответе и обернуть их в <pre>
+        if logs_tool_used and '<pre>' not in formatted_answer:
+            logger.info("Logs инструмент использован, но <pre> блоков нет. Ищу логи в ответе...")
+            # Ищем логи по паттерну timestamp
+            log_match = re.search(log_pattern, formatted_answer)
+            if log_match:
+                # Находим начало логов
+                log_start_pos = log_match.start()
+                # Разделяем на предисловие и логи
+                preface = formatted_answer[:log_start_pos].strip()
+                log_content = formatted_answer[log_start_pos:].strip()
+                
+                # Экранируем HTML в содержимом логов
+                log_content_escaped = log_content.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                
+                # Формируем новый ответ с <pre> блоками
+                if preface:
+                    formatted_answer = f"{preface}\n\n<pre>{log_content_escaped}</pre>"
+                else:
+                    formatted_answer = f"<pre>{log_content_escaped}</pre>"
+                has_logs = True
+                logger.info(f"Логи найдены и обернуты в <pre>. Длина: {len(formatted_answer)}")
+            else:
+                # Если паттерн не найден, но logs инструмент использован, 
+                # значит весь ответ - это логи (LLM могла переформатировать)
+                logger.info("Паттерн логов не найден, но logs инструмент использован. Оборачиваю весь ответ в <pre>.")
+                log_content_escaped = formatted_answer.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+                formatted_answer = f"<pre>{log_content_escaped}</pre>"
+                has_logs = True
+        
         # Отправляем ответ пользователю с HTML форматированием
-        # Разбиваем длинные ответы на части (Telegram имеет лимит 4096 символов)
-        if len(formatted_answer) > 4000:
-            # Отправляем первую часть
-            await update.message.reply_text(formatted_answer[:4000], parse_mode='HTML')
-            # Отправляем оставшуюся часть
-            await update.message.reply_text(formatted_answer[4000:], parse_mode='HTML')
+        if has_logs:
+            # Для логов разбиваем на части по 3500 символов (с запасом для HTML тегов)
+            # Используем функцию split_long_message для правильного разбиения
+            from utils import split_long_message
+            message_parts = split_long_message(formatted_answer, max_length=3500)
+            
+            logger.info(f"Логи обнаружены, разбиваю на {len(message_parts)} частей. Длина исходного сообщения: {len(formatted_answer)}")
+            for i, part in enumerate(message_parts, 1):
+                logger.info(f"Часть {i}: длина = {len(part)} символов")
+            
+            # Отправляем каждую часть отдельным сообщением
+            for i, part in enumerate(message_parts, 1):
+                try:
+                    if len(message_parts) > 1:
+                        # Добавляем номер части, если сообщений несколько
+                        part_with_header = f"<i>Часть {i} из {len(message_parts)}</i>\n\n{part}"
+                    else:
+                        part_with_header = part
+                    
+                    logger.info(f"Отправляю часть {i} из {len(message_parts)} (длина: {len(part_with_header)} символов)")
+                    await update.message.reply_text(part_with_header, parse_mode='HTML')
+                    logger.info(f"Часть {i} успешно отправлена")
+                except Exception as e:
+                    logger.error(f"Ошибка при отправке части {i} из {len(message_parts)}: {e}", exc_info=True)
+                    # Пытаемся отправить без заголовка, если была ошибка
+                    try:
+                        await update.message.reply_text(part, parse_mode='HTML')
+                        logger.info(f"Часть {i} отправлена без заголовка")
+                    except Exception as e2:
+                        logger.error(f"Ошибка при отправке части {i} без заголовка: {e2}", exc_info=True)
         else:
-            await update.message.reply_text(formatted_answer, parse_mode='HTML')
+            # Для обычных ответов используем стандартное разбиение
+            if len(formatted_answer) > 4000:
+                # Отправляем первую часть
+                await update.message.reply_text(formatted_answer[:4000], parse_mode='HTML')
+                # Отправляем оставшуюся часть
+                await update.message.reply_text(formatted_answer[4000:], parse_mode='HTML')
+            else:
+                await update.message.reply_text(formatted_answer, parse_mode='HTML')
             
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")

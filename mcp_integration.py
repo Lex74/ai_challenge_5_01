@@ -5,6 +5,7 @@ from typing import List, Dict, Any, Optional
 from mcp_client import list_notion_tools, call_notion_tool
 from mcp_kinopoisk_client import list_kinopoisk_tools, call_kinopoisk_tool
 from mcp_news_client import list_news_tools, call_news_tool
+from mcp_logs_client import list_logs_tools, call_logs_tool
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +55,15 @@ def _convert_mcp_tool_to_openai_format(mcp_tool: Dict[str, Any], server_prefix: 
                 f"Используй этот инструмент для поиска страниц, баз данных или других объектов в Notion. "
                 f"Результаты поиска содержат page_id или database_id, которые можно использовать в параметре parent "
                 f"при создании новых страниц через notion-create-pages. {description}"
+            )
+    
+    # Улучшаем описание для Logs инструментов
+    if server_prefix == "logs":
+        if "log" in name.lower() or "лог" in description.lower():
+            description = (
+                "ОБЯЗАТЕЛЬНО используй этот инструмент, когда пользователь просит показать логи бота, "
+                "посмотреть логи, проверить логи или любые запросы, связанные с логами telegram-бота. "
+                f"Этот инструмент получает последние логи из journalctl для сервиса telegram-bot.service. {description}"
             )
     
     # Преобразуем inputSchema в parameters для OpenAI
@@ -189,6 +199,22 @@ async def get_all_mcp_tools() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Не удалось получить инструменты News MCP: {e}", exc_info=True)
     
+    # Получаем инструменты Logs
+    try:
+        logs_tools = await list_logs_tools()
+        logger.info(f"Получено {len(logs_tools)} инструментов Logs MCP")
+        if logs_tools:
+            for tool in logs_tools:
+                tool_name = tool.get('name', 'unknown')
+                logger.info(f"Обрабатываю Logs инструмент: {tool_name}")
+                openai_tool = _convert_mcp_tool_to_openai_format(tool, "logs")
+                openai_tools.append(openai_tool)
+                logger.info(f"Logs инструмент {tool_name} преобразован в OpenAI формат как logs_{tool_name}")
+        else:
+            logger.warning("Список инструментов Logs MCP пуст. Проверьте путь к серверу.")
+    except Exception as e:
+        logger.error(f"Не удалось получить инструменты Logs MCP: {e}", exc_info=True)
+    
     # Кэшируем результат
     _cached_tools = openai_tools
     logger.info(f"Всего доступно {len(openai_tools)} MCP инструментов для LLM")
@@ -235,8 +261,13 @@ async def call_mcp_tool(tool_name: str, arguments: Dict[str, Any]) -> Optional[s
             result = await call_news_tool(actual_tool_name, arguments)
             logger.info(f"News MCP инструмент {actual_tool_name} вернул результат (длина: {len(str(result)) if result else 0})")
             return result
+        elif server_prefix == "logs":
+            logger.info(f"Вызываю Logs MCP инструмент: {actual_tool_name}")
+            result = await call_logs_tool(actual_tool_name, arguments)
+            logger.info(f"Logs MCP инструмент {actual_tool_name} вернул результат (длина: {len(str(result)) if result else 0})")
+            return result
         else:
-            logger.error(f"Неизвестный префикс сервера: {server_prefix}. Ожидается 'notion', 'kinopoisk' или 'news'")
+            logger.error(f"Неизвестный префикс сервера: {server_prefix}. Ожидается 'notion', 'kinopoisk', 'news' или 'logs'")
             return None
     except Exception as e:
         logger.error(f"Ошибка при вызове MCP инструмента {tool_name}: {e}", exc_info=True)

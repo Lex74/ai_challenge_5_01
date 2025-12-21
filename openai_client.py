@@ -21,9 +21,13 @@ async def send_log_to_admin(bot, log_message: str):
     """Отправляет лог админу в Telegram"""
     if ADMIN_USER_ID:
         try:
+            logger.info(f"Отправляю лог админу {ADMIN_USER_ID}: {log_message[:100]}...")
             await bot.send_message(chat_id=int(ADMIN_USER_ID), text=log_message)
+            logger.info("Лог успешно отправлен админу")
         except Exception as e:
-            logger.error(f"Ошибка при отправке лога админу: {e}")
+            logger.error(f"Ошибка при отправке лога админу: {e}", exc_info=True)
+    else:
+        logger.warning("ADMIN_USER_ID не установлен, лог админу не будет отправлен")
 
 
 def calculate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
@@ -229,6 +233,11 @@ async def query_openai(
                         if tool_result is None:
                             tool_result = "Ошибка при вызове инструмента"
                         
+                        # Если это logs инструмент, форматируем результат в моноширинный формат
+                        if tool_name.startswith("logs_"):
+                            # Обертываем логи в markdown code блок для моноширинного отображения
+                            tool_result = f"```\n{tool_result}\n```"
+                        
                         # Добавляем результат в список
                         tool_results.append({
                             "tool_call_id": tool_id,
@@ -348,7 +357,10 @@ async def query_openai(
         
         # Отправляем лог админу
         if bot:
+            logger.info(f"Попытка отправить лог админу. ADMIN_USER_ID={ADMIN_USER_ID}")
             await send_log_to_admin(bot, log_message)
+        else:
+            logger.warning("bot не передан в query_openai, лог админу не будет отправлен")
         
         # Обновляем историю: добавляем вопрос пользователя и ответ бота
         updated_history = conversation_history.copy()
