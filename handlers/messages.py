@@ -486,22 +486,45 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         answer = remove_source_numbers(answer)
         
         # Проверяем, использовался ли logs инструмент в этом запросе
-        # Проверяем историю на наличие вызовов logs инструментов
+        # Проверяем историю на наличие вызовов logs инструментов и их результаты
         logs_tool_used = False
+        logs_tool_result = None
         if updated_history:
             for msg in updated_history:
                 tool_name = msg.get("name", "")
                 if msg.get("role") == "tool" and tool_name.startswith("logs_"):
                     logs_tool_used = True
-                    logger.info(f"Обнаружен вызов logs инструмента: {tool_name}")
+                    logs_tool_result = msg.get("content", "")
+                    logger.info(f"Обнаружен вызов logs инструмента: {tool_name}, длина результата: {len(str(logs_tool_result)) if logs_tool_result else 0}")
+                    # Логируем первые 200 символов результата для отладки
+                    if logs_tool_result:
+                        preview = str(logs_tool_result)[:200]
+                        logger.debug(f"Превью результата logs инструмента: {preview}...")
                     break
         
-        # Если использовался logs инструмент, но в ответе нет code блоков, добавляем их
-        if logs_tool_used and "```" not in answer:
-            # Ищем паттерны логов (timestamp формата "Dec 19 06:59:56" или "MMM DD HH:MM:SS")
-            # Улучшенный паттерн для journalctl логов
-            log_pattern = r'([A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2})'
-            if re.search(log_pattern, answer):
+        # Логируем ответ для отладки
+        logger.debug(f"Ответ от LLM (первые 300 символов): {answer[:300] if len(answer) > 300 else answer}")
+        
+        # Если использовался logs инструмент, проверяем, есть ли реальные логи
+        # Паттерн для определения логов: timestamp формата "Dec 19 06:59:56" или "MMM DD HH:MM:SS"
+        # Используем один паттерн для всех проверок
+        log_pattern = r'[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}'
+        
+        # Проверяем, содержит ли результат инструмента реальные логи
+        logs_tool_has_logs = False
+        if logs_tool_result:
+            # Убираем markdown code блоки из результата инструмента для проверки
+            tool_result_clean = str(logs_tool_result).replace("```", "").strip()
+            logs_tool_has_logs = bool(re.search(log_pattern, tool_result_clean))
+            logger.info(f"Проверка результата logs инструмента: содержит логи={logs_tool_has_logs}, длина={len(tool_result_clean)}")
+        
+        # Проверяем, содержит ли ответ LLM реальные логи
+        answer_has_logs = bool(re.search(log_pattern, answer))
+        
+        # Если использовался logs инструмент и в ответе нет code блоков, добавляем их
+        # НО только если есть реальные логи (либо в результате инструмента, либо в ответе LLM)
+        if logs_tool_used and "```" not in answer and (logs_tool_has_logs or answer_has_logs):
+            if answer_has_logs:
                 # Если ответ содержит логи, оборачиваем их в code блок
                 # Но сначала убираем возможные предисловия от LLM
                 lines = answer.split('\n')
@@ -519,11 +542,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 elif log_start == 0:
                     # Весь ответ - это логи
                     answer = f"```\n{answer}\n```"
-            else:
-                # Если паттерн не найден, но logs инструмент использован, 
-                # значит весь ответ - это логи (LLM могла переформатировать)
-                logger.info("Logs инструмент использован, но паттерн логов не найден. Оборачиваю весь ответ в code блок.")
+            elif logs_tool_has_logs:
+                # Если логи есть в результате инструмента, но LLM их переформатировала,
+                # оборачиваем весь ответ в code блок
+                logger.info("Logs инструмент вернул логи, но LLM переформатировала ответ. Оборачиваю весь ответ в code блок.")
                 answer = f"```\n{answer}\n```"
+        elif logs_tool_used and not logs_tool_has_logs and not answer_has_logs:
+            # Инструмент использован, но реальных логов нет (пустой результат или ошибка)
+            logger.info("Logs инструмент использован, но реальных логов не обнаружено. Не оборачиваю ответ в code блок.")
+        
+        # Проверяем наличие паттерна логов в исходном ответе ДО форматирования
+        # Используем тот же паттерн, что был определен выше
+        has_log_pattern_in_answer = bool(re.search(log_pattern, answer))
         
         # Преобразуем markdown в форматирование Telegram
         formatted_answer = convert_markdown_to_telegram(answer)
@@ -537,13 +567,31 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         
         # Проверяем, содержит ли ответ логи (по наличию <pre> блоков или паттернов логов)
-        # Паттерн для определения логов: timestamp формата "Dec 19 06:59:56" или "MMM DD HH:MM:SS"
+        # Ищем паттерн как в исходном ответе, так и внутри <pre> блоков в отформатированном ответе
         has_pre_tag = '<pre>' in formatted_answer
-        log_pattern = r'[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}'
-        has_log_pattern = bool(re.search(log_pattern, formatted_answer))
-        has_logs = has_pre_tag or has_log_pattern or logs_tool_used
         
-        logger.info(f"Проверка логов: logs_tool_used={logs_tool_used}, has_pre_tag={has_pre_tag}, has_log_pattern={has_log_pattern}, has_logs={has_logs}, длина ответа={len(formatted_answer)}")
+        # Ищем паттерн внутри <pre> блоков (после экранирования HTML)
+        # Извлекаем содержимое всех <pre> блоков и ищем паттерн там
+        pre_blocks = re.findall(r'<pre>(.*?)</pre>', formatted_answer, re.DOTALL)
+        has_log_pattern_in_pre = False
+        for pre_content in pre_blocks:
+            # Декодируем HTML entities для поиска паттерна
+            pre_content_decoded = pre_content.replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+            if re.search(log_pattern, pre_content_decoded):
+                has_log_pattern_in_pre = True
+                break
+        
+        # Также ищем паттерн во всем отформатированном ответе (на случай, если логи не в <pre>)
+        has_log_pattern_in_formatted = bool(re.search(log_pattern, formatted_answer))
+        
+        # Объединяем все проверки
+        # Учитываем, что если инструмент logs вернул пустой результат, то не считаем ответ логами
+        has_log_pattern = has_log_pattern_in_answer or has_log_pattern_in_pre or has_log_pattern_in_formatted
+        # has_logs = True только если есть реальные логи (паттерн или <pre> с логами), 
+        # или если инструмент logs использован И вернул непустой результат с логами
+        has_logs = has_pre_tag or has_log_pattern or (logs_tool_used and logs_tool_has_logs)
+        
+        logger.info(f"Проверка логов: logs_tool_used={logs_tool_used}, logs_tool_has_logs={logs_tool_has_logs}, has_pre_tag={has_pre_tag}, has_log_pattern={has_log_pattern}, has_logs={has_logs}, длина ответа={len(formatted_answer)}")
         
         # Если использовался logs инструмент, но нет <pre> блоков, значит LLM убрала форматирование
         # В этом случае нужно найти логи в ответе и обернуть их в <pre>
