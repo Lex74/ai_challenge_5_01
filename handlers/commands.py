@@ -79,6 +79,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/notion_tools - показать список доступных инструментов Notion\n"
         "/kinopoisk_tools - показать список доступных инструментов Kinopoisk MCP\n"
         "/news_tools - показать список доступных инструментов News MCP\n\n"
+        "/rag_mode - установить режим RAG (off/on/compare)\n"
+        "/getragmode - показать текущий режим RAG\n\n"
         "Температура влияет на креативность ответов (диапазон: 0.0-2.0)"
     )
 
@@ -851,3 +853,60 @@ async def kp_search_pagination_callback(update: Update, context: ContextTypes.DE
             chat_id=chat_id,
             text=f"❌ Произошла ошибка при поиске фильмов:\n{str(e)}",
         )
+
+
+async def rag_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /rag_mode для переключения режима RAG"""
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text(
+            "Использование: /rag_mode <режим>\n\n"
+            "Доступные режимы:\n"
+            "• off - без RAG (обычный режим)\n"
+            "• on - с RAG (используется контекст из документов)\n"
+            "• compare - сравнение ответов с RAG и без RAG\n\n"
+            "Пример: /rag_mode compare"
+        )
+        return
+    
+    mode = context.args[0].strip().lower()
+    
+    if mode not in ['off', 'on', 'compare']:
+        await update.message.reply_text(
+            "❌ Неверный режим. Используйте: off, on или compare\n\n"
+            "Пример: /rag_mode compare"
+        )
+        return
+    
+    # Сохраняем режим в user_data
+    context.user_data['rag_mode'] = mode
+    
+    mode_names = {
+        'off': 'без RAG',
+        'on': 'с RAG',
+        'compare': 'сравнение (RAG vs без RAG)'
+    }
+    
+    await update.message.reply_text(
+        f"✅ Режим RAG установлен: {mode_names.get(mode, mode)}"
+    )
+    logger.info(f"Пользователь {update.effective_user.id} установил режим RAG: {mode}")
+
+
+async def getragmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /getragmode для просмотра текущего режима RAG"""
+    # Получаем текущий режим или используем дефолтный (off)
+    current_mode = context.user_data.get('rag_mode', 'off')
+    is_default = 'rag_mode' not in context.user_data
+    
+    mode_names = {
+        'off': 'без RAG',
+        'on': 'с RAG',
+        'compare': 'сравнение (RAG vs без RAG)'
+    }
+    
+    mode_text = (
+        f"Текущий режим RAG: {mode_names.get(current_mode, current_mode)}"
+        f"{' (дефолтный)' if is_default else ''}"
+    )
+    
+    await update.message.reply_text(mode_text)

@@ -24,6 +24,8 @@ from handlers.commands import (
     notion_tools_command,
     kinopoisk_tools_command,
     news_tools_command,
+    rag_mode_command,
+    getragmode_command,
 )
 from handlers.messages import handle_message
 from mcp_integration import get_all_mcp_tools
@@ -83,6 +85,8 @@ def main():
     application.add_handler(CommandHandler("notion_tools", notion_tools_command))
     application.add_handler(CommandHandler("kinopoisk_tools", kinopoisk_tools_command))
     application.add_handler(CommandHandler("news_tools", news_tools_command))
+    application.add_handler(CommandHandler("rag_mode", rag_mode_command))
+    application.add_handler(CommandHandler("getragmode", getragmode_command))
     
     # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

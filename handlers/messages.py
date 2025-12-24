@@ -22,7 +22,9 @@ from utils import (
     remove_marker_from_answer,
     remove_source_numbers,
     convert_markdown_to_telegram,
+    split_long_message,
 )
+import utils  # Импортируем модуль целиком для надежности
 from config import NOTION_NEWS_PAGE_ID
 
 logger = logging.getLogger(__name__)
@@ -387,17 +389,150 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 logger.info("Добавлено явное указание использовать News инструмент в запросе пользователя")
         
-        # Получаем ответ от OpenAI с полной историей диалога и MCP инструментами
-        answer, updated_history = await query_openai(
-            enhanced_user_message,
-            full_conversation_history,
-            full_system_prompt,
-            temperature,
-            model,
-            max_tokens,
-            context.bot,
-            tools=mcp_tools if mcp_tools else None
-        )
+        # Проверяем режим RAG
+        rag_mode = context.user_data.get('rag_mode', 'off')
+        
+        # Получаем ответ в зависимости от режима RAG
+        if rag_mode == 'compare':
+            # Режим сравнения: получаем оба ответа и сравниваем
+            from rag import compare_rag_vs_no_rag
+            
+            await thinking_message.edit_text("🤔 Получаю ответы с RAG и без RAG для сравнения...")
+            
+            comparison_result = await compare_rag_vs_no_rag(
+                enhanced_user_message,
+                full_conversation_history,
+                full_system_prompt,
+                temperature,
+                model,
+                max_tokens,
+                context.bot,
+                tools=mcp_tools if mcp_tools else None
+            )
+            
+            answer_without_rag = comparison_result['answer_without_rag']
+            answer_with_rag = comparison_result['answer_with_rag']
+            comparison = comparison_result['comparison']
+            
+            # Форматируем ответы
+            answer_without_rag_formatted = utils.convert_markdown_to_telegram(answer_without_rag)
+            answer_with_rag_formatted = utils.convert_markdown_to_telegram(answer_with_rag)
+            comparison_formatted = utils.convert_markdown_to_telegram(comparison)
+            
+            # Отправляем результаты сравнения
+            await thinking_message.delete()
+            
+            # Отправляем ответ без RAG
+            await update.message.reply_text(
+                "<b>📝 Ответ БЕЗ RAG:</b>\n\n" + answer_without_rag_formatted,
+                parse_mode='HTML'
+            )
+            
+            # Отправляем ответ с RAG
+            await update.message.reply_text(
+                "<b>📚 Ответ С RAG:</b>\n\n" + answer_with_rag_formatted,
+                parse_mode='HTML'
+            )
+            
+            # Отправляем анализ сравнения
+            comparison_parts = split_long_message(comparison_formatted, max_length=4000)
+            for i, part in enumerate(comparison_parts, 1):
+                if len(comparison_parts) > 1:
+                    header = f"<b>📊 Анализ сравнения (часть {i} из {len(comparison_parts)}):</b>\n\n"
+                else:
+                    header = "<b>📊 Анализ сравнения:</b>\n\n"
+                await update.message.reply_text(header + part, parse_mode='HTML')
+            
+            # Используем ответ с RAG для обновления истории
+            answer = answer_with_rag
+            updated_history = full_conversation_history.copy()
+            updated_history.append({"role": "user", "content": enhanced_user_message})
+            updated_history.append({"role": "assistant", "content": answer_with_rag})
+            
+            # В режиме сравнения сообщение "Думаю..." уже удалено выше
+            # Пропускаем обычную обработку ответа, так как уже отправили результаты
+            # Но нужно обработать историю для сохранения памяти
+            goal_formulated = is_goal_formulated(answer)
+            
+            if goal_formulated:
+                # Очищаем память на диске после формулировки цели
+                clear_memory(user_id)
+                logger.info("Цель сформулирована, память очищена (режим сравнения)")
+            else:
+                # Добавляем новое сообщение в recent_messages
+                recent_messages.append({"role": "user", "content": user_message})
+                recent_messages.append({"role": "assistant", "content": answer})
+                
+                # Увеличиваем счетчик сообщений
+                message_count += 1
+                
+                # Если достигли порога саммаризации
+                if message_count >= MESSAGES_BEFORE_SUMMARY:
+                    # Саммаризируем текущую историю
+                    history_to_summarize = []
+                    if summary:
+                        history_to_summarize.append({
+                            "role": "user",
+                            "content": f"Контекст предыдущих диалогов: {summary}"
+                        })
+                        history_to_summarize.append({
+                            "role": "assistant",
+                            "content": "Понял, продолжаю диалог с учетом этого контекста."
+                        })
+                    history_to_summarize.extend(recent_messages)
+                    
+                    new_summary = await summarize_conversation(history_to_summarize, model, context.bot)
+                    
+                    if new_summary and new_summary.strip():
+                        if summary:
+                            combined_summary = f"{summary}\n\n{new_summary}"
+                        else:
+                            combined_summary = new_summary
+                        summary = combined_summary
+                        recent_messages = []
+                        message_count = 0
+                        logger.info(f"Выполнена саммаризация для пользователя {user_id}")
+                    else:
+                        if len(recent_messages) > MAX_RECENT_MESSAGES:
+                            recent_messages = recent_messages[-MAX_RECENT_MESSAGES:]
+                        message_count = 0
+                
+                # Сохраняем память
+                memory_data = {
+                    "summary": summary,
+                    "recent_messages": recent_messages,
+                    "message_count": message_count
+                }
+                save_memory_to_disk(user_id, memory_data)
+            
+            return  # Выходим, так как уже отправили все результаты
+            
+        elif rag_mode == 'on':
+            # Режим с RAG: используем query_with_rag
+            from rag import query_with_rag
+            
+            answer, updated_history = await query_with_rag(
+                enhanced_user_message,
+                full_conversation_history,
+                full_system_prompt,
+                temperature,
+                model,
+                max_tokens,
+                context.bot,
+                tools=mcp_tools if mcp_tools else None
+            )
+        else:
+            # Режим без RAG (off или не установлен): используем обычный запрос
+            answer, updated_history = await query_openai(
+                enhanced_user_message,
+                full_conversation_history,
+                full_system_prompt,
+                temperature,
+                model,
+                max_tokens,
+                context.bot,
+                tools=mcp_tools if mcp_tools else None
+            )
         
         # Удаляем сообщение "Думаю..."
         await thinking_message.delete()
@@ -556,7 +691,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         has_log_pattern_in_answer = bool(re.search(log_pattern, answer))
         
         # Преобразуем markdown в форматирование Telegram
-        formatted_answer = convert_markdown_to_telegram(answer)
+        # Используем полный путь для надежности
+        formatted_answer = utils.convert_markdown_to_telegram(answer)
         
         # Проверяем, что ответ не пустой
         if not formatted_answer or not formatted_answer.strip():
@@ -628,7 +764,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if has_logs:
             # Для логов разбиваем на части по 3500 символов (с запасом для HTML тегов)
             # Используем функцию split_long_message для правильного разбиения
-            from utils import split_long_message
             message_parts = split_long_message(formatted_answer, max_length=3500)
             
             logger.info(f"Логи обнаружены, разбиваю на {len(message_parts)} частей. Длина исходного сообщения: {len(formatted_answer)}")

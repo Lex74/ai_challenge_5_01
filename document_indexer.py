@@ -17,6 +17,14 @@ EMBEDDING_MODEL = "nomic-embed-text"  # Модель для эмбеддинго
 EMBEDDING_DIM = 768  # Размерность эмбеддинга для nomic-embed-text
 OLLAMA_API_URL = os.getenv("OLLAMA_API_URL", "http://localhost:11434/api/embeddings")
 
+# OpenAI Embeddings
+OPENAI_EMBEDDING_MODEL = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")  # Модель для эмбеддингов OpenAI
+OPENAI_EMBEDDING_DIM = {
+    "text-embedding-3-small": 1536,
+    "text-embedding-3-large": 3072,
+    "text-embedding-ada-002": 1536
+}
+
 # Путь для сохранения индекса
 INDEX_DIR = "document_index"
 INDEX_FILE = os.path.join(INDEX_DIR, "index.json")
@@ -142,12 +150,82 @@ def split_text_into_chunks(text: str, chunk_size: int = CHUNK_SIZE, overlap: int
     return chunks
 
 
-def get_embedding(text: str, model: str = EMBEDDING_MODEL) -> Optional[List[float]]:
-    """Получает эмбеддинг для текста через OLLama API
+def get_embedding_openai(text: str, model: str = None) -> Optional[List[float]]:
+    """Получает эмбеддинг для текста через OpenAI API
     
     Args:
         text: Текст для получения эмбеддинга
-        model: Модель для генерации эмбеддинга
+        model: Модель для генерации эмбеддинга (если None, используется OPENAI_EMBEDDING_MODEL)
+    
+    Returns:
+        Список чисел (вектор эмбеддинга) или None в случае ошибки
+    """
+    from config import OPENAI_API_KEY
+    
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY не установлен, невозможно получить эмбеддинг через OpenAI")
+        return None
+    
+    if model is None:
+        model = OPENAI_EMBEDDING_MODEL
+    
+    # Проверяем размер текста
+    if len(text) == 0:
+        logger.warning("Получен пустой текст для эмбеддинга")
+        return None
+    
+    # OpenAI имеет лимит 8191 токенов для эмбеддингов, но для безопасности обрезаем до 8000 символов
+    if len(text) > 8000:
+        logger.warning(f"Текст слишком длинный ({len(text)} символов), обрезаю до 8000")
+        text = text[:8000]
+    
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "model": model,
+        "input": text
+    }
+    
+    try:
+        logger.debug(f"Отправляю запрос к OpenAI для эмбеддинга (модель: {model})")
+        response = requests.post(
+            "https://api.openai.com/v1/embeddings",
+            json=payload,
+            headers=headers,
+            timeout=30
+        )
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        if 'data' in data and len(data['data']) > 0:
+            embedding = data['data'][0]['embedding']
+            logger.debug(f"Получен эмбеддинг размерности {len(embedding)} от OpenAI для текста длиной {len(text)} символов")
+            return embedding
+        else:
+            logger.error(f"Не удалось получить эмбеддинг из ответа OpenAI API. Ответ: {data}")
+            return None
+            
+    except requests.exceptions.HTTPError as e:
+        logger.error(f"HTTP ошибка от OpenAI: {e}")
+        if hasattr(e.response, 'text'):
+            logger.error(f"Детали ошибки: {e.response.text}")
+        return None
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при получении эмбеддинга от OpenAI: {e}", exc_info=True)
+        return None
+
+
+def get_embedding(text: str, model: str = EMBEDDING_MODEL, use_openai_fallback: bool = True) -> Optional[List[float]]:
+    """Получает эмбеддинг для текста через OLLama API, с fallback на OpenAI
+    
+    Args:
+        text: Текст для получения эмбеддинга
+        model: Модель для генерации эмбеддинга (для OLLama)
+        use_openai_fallback: Использовать ли OpenAI как fallback, если OLLama недоступен
     
     Returns:
         Список чисел (вектор эмбеддинга) или None в случае ошибки
@@ -191,19 +269,38 @@ def get_embedding(text: str, model: str = EMBEDDING_MODEL) -> Optional[List[floa
             return None
             
     except requests.exceptions.ConnectionError as e:
-        logger.error(f"Не удалось подключиться к OLLama: {e}")
-        logger.error("Убедитесь, что OLLama запущен: ollama serve")
-        return None
+        # Это не критическая ошибка, если OLLama просто не запущен - это нормальная ситуация
+        logger.warning(f"OLLama недоступен, пробую использовать OpenAI как fallback: {e}")
+        if use_openai_fallback:
+            logger.info("Использую OpenAI для получения эмбеддинга запроса")
+            openai_embedding = get_embedding_openai(text)
+            if openai_embedding:
+                logger.info(f"Успешно получен эмбеддинг от OpenAI (размерность: {len(openai_embedding)})")
+            else:
+                logger.warning("Не удалось получить эмбеддинг от OpenAI")
+            return openai_embedding
+        else:
+            logger.debug("Для использования RAG необходимо запустить OLLama: ollama serve")
+            return None
     except requests.exceptions.Timeout:
-        logger.error("Таймаут при запросе к OLLama (возможно, модель не установлена или не загружена)")
+        logger.warning("Таймаут при запросе к OLLama, пробую использовать OpenAI как fallback")
+        if use_openai_fallback:
+            logger.info("Использую OpenAI для получения эмбеддинга запроса")
+            return get_embedding_openai(text)
         return None
     except requests.exceptions.HTTPError as e:
-        logger.error(f"HTTP ошибка от OLLama: {e}")
+        logger.warning(f"HTTP ошибка от OLLama: {e}, пробую использовать OpenAI как fallback")
         if hasattr(e.response, 'text'):
-            logger.error(f"Детали ошибки: {e.response.text}")
+            logger.debug(f"Детали ошибки OLLama: {e.response.text}")
+        if use_openai_fallback:
+            logger.info("Использую OpenAI для получения эмбеддинга запроса")
+            return get_embedding_openai(text)
         return None
     except Exception as e:
-        logger.error(f"Неожиданная ошибка при получении эмбеддинга: {e}", exc_info=True)
+        logger.warning(f"Неожиданная ошибка при получении эмбеддинга от OLLama: {e}, пробую OpenAI как fallback")
+        if use_openai_fallback:
+            logger.info("Использую OpenAI для получения эмбеддинга запроса")
+            return get_embedding_openai(text)
         return None
 
 
@@ -525,16 +622,20 @@ def save_index(index: Dict[str, Any], file_path: str = INDEX_FILE) -> None:
         raise
 
 
-def load_index(file_path: str = INDEX_FILE) -> Optional[Dict[str, Any]]:
+def load_index(file_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """Загружает индекс из JSON файла
     
     Args:
-        file_path: Путь к файлу с индексом
+        file_path: Путь к файлу с индексом (если None, используется INDEX_FILE)
     
     Returns:
         Словарь с индексом или None, если файл не найден
     """
     try:
+        # Если путь не указан, используем дефолтный
+        if file_path is None:
+            file_path = INDEX_FILE
+        
         if not os.path.exists(file_path):
             logger.warning(f"Файл индекса не найден: {file_path}")
             return None
@@ -544,7 +645,7 @@ def load_index(file_path: str = INDEX_FILE) -> Optional[Dict[str, Any]]:
         logger.info(f"Индекс загружен из {file_path}")
         return index
     except Exception as e:
-        logger.error(f"Ошибка при загрузке индекса: {e}")
+        logger.error(f"Ошибка при загрузке индекса: {e}", exc_info=True)
         return None
 
 
@@ -567,21 +668,61 @@ def search_index(query: str, index: Dict[str, Any], top_k: int = 5) -> List[Dict
         logger.warning("Индекс пуст или некорректен")
         return []
     
-    # Получаем эмбеддинг для запроса
-    query_embedding = get_embedding(query)
+    # Получаем эмбеддинг для запроса (с fallback на OpenAI)
+    query_embedding = get_embedding(query, use_openai_fallback=True)
     if query_embedding is None:
-        logger.error("Не удалось получить эмбеддинг для запроса")
+        logger.warning("Не удалось получить эмбеддинг для запроса (OLLama и OpenAI недоступны или произошла ошибка)")
         return []
+    
+    # Проверяем размерность эмбеддингов в индексе
+    chunks = index['chunks']
+    if not chunks:
+        logger.warning("Индекс не содержит чанков")
+        return []
+    
+    # Находим первый чанк с эмбеддингом для проверки размерности
+    index_embedding_dim = None
+    for chunk in chunks:
+        if 'embedding' in chunk:
+            index_embedding_dim = len(chunk['embedding'])
+            break
+    
+    if index_embedding_dim is None:
+        logger.warning("Индекс не содержит эмбеддингов")
+        return []
+    
+    # Проверяем совместимость размерностей
+    query_embedding_dim = len(query_embedding)
+    if query_embedding_dim != index_embedding_dim:
+        logger.warning(
+            f"Размерности эмбеддингов не совпадают: запрос={query_embedding_dim}, индекс={index_embedding_dim}. "
+            f"Результаты могут быть неточными. Рекомендуется пересоздать индекс с той же моделью эмбеддингов."
+        )
+        # Можно попробовать обрезать или дополнить, но лучше просто предупредить
+        # Для простоты просто используем как есть - косинусное сходство все равно можно вычислить
+        # если обрезать до минимальной размерности
+        min_dim = min(query_embedding_dim, index_embedding_dim)
+        if query_embedding_dim > min_dim:
+            query_embedding = query_embedding[:min_dim]
+            logger.info(f"Обрезал эмбеддинг запроса до {min_dim} размерности")
     
     # Вычисляем сходство с каждым чанком
     results = []
-    chunks = index['chunks']
     
     for chunk in chunks:
         if 'embedding' not in chunk:
             continue
         
-        similarity = cosine_similarity(query_embedding, chunk['embedding'])
+        chunk_embedding = chunk['embedding']
+        # Обрезаем до минимальной размерности, если нужно
+        if len(chunk_embedding) != len(query_embedding):
+            min_dim = min(len(chunk_embedding), len(query_embedding))
+            chunk_embedding = chunk_embedding[:min_dim]
+            query_emb = query_embedding[:min_dim]
+        else:
+            query_emb = query_embedding
+        
+        similarity = cosine_similarity(query_emb, chunk_embedding)
         results.append({
             'chunk': chunk,
             'similarity': similarity,
