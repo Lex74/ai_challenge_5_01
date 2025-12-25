@@ -79,8 +79,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/notion_tools - показать список доступных инструментов Notion\n"
         "/kinopoisk_tools - показать список доступных инструментов Kinopoisk MCP\n"
         "/news_tools - показать список доступных инструментов News MCP\n\n"
-        "/rag_mode - установить режим RAG (off/on/compare)\n"
-        "/getragmode - показать текущий режим RAG\n\n"
+        "/rag_mode - установить режим RAG (off/on/compare/compare_filter)\n"
+        "/getragmode - показать текущий режим RAG\n"
+        "/setragthreshold - установить порог релевантности (0.0-1.0)\n"
+        "/getragthreshold - показать текущий порог релевантности\n"
+        "/setragrerank - установить метод реранкинга (similarity/diversity/hybrid/off)\n\n"
         "Температура влияет на креативность ответов (диапазон: 0.0-2.0)"
     )
 
@@ -863,17 +866,18 @@ async def rag_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Доступные режимы:\n"
             "• off - без RAG (обычный режим)\n"
             "• on - с RAG (используется контекст из документов)\n"
-            "• compare - сравнение ответов с RAG и без RAG\n\n"
-            "Пример: /rag_mode compare"
+            "• compare - сравнение ответов с RAG и без RAG\n"
+            "• compare_filter - сравнение ответов с фильтром и без фильтра\n\n"
+            "Пример: /rag_mode compare_filter"
         )
         return
     
     mode = context.args[0].strip().lower()
     
-    if mode not in ['off', 'on', 'compare']:
+    if mode not in ['off', 'on', 'compare', 'compare_filter']:
         await update.message.reply_text(
-            "❌ Неверный режим. Используйте: off, on или compare\n\n"
-            "Пример: /rag_mode compare"
+            "❌ Неверный режим. Используйте: off, on, compare или compare_filter\n\n"
+            "Пример: /rag_mode compare_filter"
         )
         return
     
@@ -883,7 +887,8 @@ async def rag_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode_names = {
         'off': 'без RAG',
         'on': 'с RAG',
-        'compare': 'сравнение (RAG vs без RAG)'
+        'compare': 'сравнение (RAG vs без RAG)',
+        'compare_filter': 'сравнение (с фильтром vs без фильтра)'
     }
     
     await update.message.reply_text(
@@ -901,7 +906,8 @@ async def getragmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
     mode_names = {
         'off': 'без RAG',
         'on': 'с RAG',
-        'compare': 'сравнение (RAG vs без RAG)'
+        'compare': 'сравнение (RAG vs без RAG)',
+        'compare_filter': 'сравнение (с фильтром vs без фильтра)'
     }
     
     mode_text = (
@@ -909,4 +915,111 @@ async def getragmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
         f"{' (дефолтный)' if is_default else ''}"
     )
     
+    # Добавляем информацию о пороге релевантности, если установлен
+    threshold = context.user_data.get('rag_relevance_threshold')
+    if threshold is not None:
+        mode_text += f"\nПорог релевантности: {threshold:.3f}"
+    
+    # Добавляем информацию о методе реранкинга, если установлен
+    rerank_method = context.user_data.get('rag_rerank_method')
+    if rerank_method:
+        mode_text += f"\nМетод реранкинга: {rerank_method}"
+    
     await update.message.reply_text(mode_text)
+
+
+async def setragthreshold_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /setragthreshold для установки порога релевантности"""
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text(
+            "Использование: /setragthreshold <порог>\n\n"
+            "Порог релевантности должен быть числом от -1.0 до 1.0.\n"
+            "Примеры:\n"
+            "• /setragthreshold 0.3 - средний порог (рекомендуется)\n"
+            "• /setragthreshold 0.5 - высокий порог (строгая фильтрация)\n"
+            "• /setragthreshold 0.0 - низкий порог (мягкая фильтрация)\n"
+            "• /setragthreshold -1 - отключить фильтрацию\n\n"
+            "Чем выше порог, тем более релевантные чанки будут использоваться."
+        )
+        return
+    
+    try:
+        new_threshold = float(context.args[0])
+        
+        # Проверяем диапазон
+        if new_threshold < -1.0 or new_threshold > 1.0:
+            await update.message.reply_text(
+                "❌ Порог должен быть в диапазоне от -1.0 до 1.0."
+            )
+            return
+        
+        # Сохраняем порог в user_data
+        if new_threshold <= -1.0:
+            # Отключаем фильтрацию
+            if 'rag_relevance_threshold' in context.user_data:
+                del context.user_data['rag_relevance_threshold']
+            await update.message.reply_text(
+                "✅ Фильтрация по порогу релевантности отключена"
+            )
+        else:
+            context.user_data['rag_relevance_threshold'] = new_threshold
+            await update.message.reply_text(
+                f"✅ Порог релевантности установлен: {new_threshold:.3f}"
+            )
+        
+        logger.info(f"Пользователь {update.effective_user.id} установил порог релевантности: {new_threshold}")
+        
+    except ValueError:
+        await update.message.reply_text(
+            "❌ Ошибка: порог должен быть числом.\n"
+            "Пример: /setragthreshold 0.3"
+        )
+
+
+async def getragthreshold_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /getragthreshold для просмотра текущего порога релевантности"""
+    threshold = context.user_data.get('rag_relevance_threshold')
+    
+    if threshold is None:
+        threshold_text = "Порог релевантности не установлен (фильтрация отключена)"
+    else:
+        threshold_text = f"Текущий порог релевантности: {threshold:.3f}"
+    
+    await update.message.reply_text(threshold_text)
+
+
+async def setragrerank_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /setragrerank для установки метода реранкинга"""
+    if not context.args or len(context.args) != 1:
+        await update.message.reply_text(
+            "Использование: /setragrerank <метод>\n\n"
+            "Доступные методы:\n"
+            "• similarity - сортировка по релевантности (по умолчанию)\n"
+            "• diversity - убирает дубликаты, оставляет уникальные чанки\n"
+            "• hybrid - комбинация similarity и diversity\n"
+            "• off - отключить реранкинг\n\n"
+            "Пример: /setragrerank diversity"
+        )
+        return
+    
+    method = context.args[0].strip().lower()
+    
+    valid_methods = ['similarity', 'diversity', 'hybrid', 'off', 'none']
+    
+    if method not in valid_methods:
+        await update.message.reply_text(
+            f"❌ Неверный метод. Используйте: {', '.join(valid_methods)}\n\n"
+            "Пример: /setragrerank diversity"
+        )
+        return
+    
+    # Сохраняем метод в user_data
+    if method in ['off', 'none']:
+        if 'rag_rerank_method' in context.user_data:
+            del context.user_data['rag_rerank_method']
+        await update.message.reply_text("✅ Реранкинг отключен")
+    else:
+        context.user_data['rag_rerank_method'] = method
+        await update.message.reply_text(f"✅ Метод реранкинга установлен: {method}")
+    
+    logger.info(f"Пользователь {update.effective_user.id} установил метод реранкинга: {method}")

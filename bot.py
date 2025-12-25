@@ -26,6 +26,9 @@ from handlers.commands import (
     news_tools_command,
     rag_mode_command,
     getragmode_command,
+    setragthreshold_command,
+    getragthreshold_command,
+    setragrerank_command,
 )
 from handlers.messages import handle_message
 from mcp_integration import get_all_mcp_tools
@@ -87,6 +90,9 @@ def main():
     application.add_handler(CommandHandler("news_tools", news_tools_command))
     application.add_handler(CommandHandler("rag_mode", rag_mode_command))
     application.add_handler(CommandHandler("getragmode", getragmode_command))
+    application.add_handler(CommandHandler("setragthreshold", setragthreshold_command))
+    application.add_handler(CommandHandler("getragthreshold", getragthreshold_command))
+    application.add_handler(CommandHandler("setragrerank", setragrerank_command))
     
     # Регистрируем обработчик текстовых сообщений
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

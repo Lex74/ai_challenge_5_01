@@ -392,8 +392,123 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Проверяем режим RAG
         rag_mode = context.user_data.get('rag_mode', 'off')
         
+        # Получаем настройки фильтрации и реранкинга
+        relevance_threshold = context.user_data.get('rag_relevance_threshold')
+        rerank_method = context.user_data.get('rag_rerank_method')
+        
         # Получаем ответ в зависимости от режима RAG
-        if rag_mode == 'compare':
+        if rag_mode == 'compare_filter':
+            # Режим сравнения с фильтром и без фильтра
+            from rag import compare_rag_with_and_without_filter
+            
+            # Используем порог по умолчанию, если не установлен
+            if relevance_threshold is None:
+                relevance_threshold = 0.3  # Порог по умолчанию
+            
+            await thinking_message.edit_text("🤔 Получаю ответы с фильтром и без фильтра для сравнения...")
+            
+            comparison_result = await compare_rag_with_and_without_filter(
+                enhanced_user_message,
+                full_conversation_history,
+                full_system_prompt,
+                temperature,
+                model,
+                max_tokens,
+                context.bot,
+                tools=mcp_tools if mcp_tools else None,
+                relevance_threshold=relevance_threshold,
+                rerank_method=rerank_method
+            )
+            
+            answer_without_filter = comparison_result['answer_without_filter']
+            answer_with_filter = comparison_result['answer_with_filter']
+            comparison = comparison_result['comparison']
+            
+            # Форматируем ответы
+            answer_without_filter_formatted = utils.convert_markdown_to_telegram(answer_without_filter)
+            answer_with_filter_formatted = utils.convert_markdown_to_telegram(answer_with_filter)
+            comparison_formatted = utils.convert_markdown_to_telegram(comparison)
+            
+            # Отправляем результаты сравнения
+            await thinking_message.delete()
+            
+            # Отправляем ответ без фильтра
+            await update.message.reply_text(
+                "<b>📝 Ответ БЕЗ фильтра:</b>\n\n" + answer_without_filter_formatted,
+                parse_mode='HTML'
+            )
+            
+            # Отправляем ответ с фильтром
+            await update.message.reply_text(
+                f"<b>🔍 Ответ С фильтром (порог: {relevance_threshold:.3f}):</b>\n\n" + answer_with_filter_formatted,
+                parse_mode='HTML'
+            )
+            
+            # Отправляем анализ сравнения
+            comparison_parts = split_long_message(comparison_formatted, max_length=4000)
+            for i, part in enumerate(comparison_parts, 1):
+                if len(comparison_parts) > 1:
+                    header = f"<b>📊 Анализ сравнения (часть {i} из {len(comparison_parts)}):</b>\n\n"
+                else:
+                    header = "<b>📊 Анализ сравнения:</b>\n\n"
+                await update.message.reply_text(header + part, parse_mode='HTML')
+            
+            # Используем ответ с фильтром для обновления истории
+            answer = answer_with_filter
+            updated_history = full_conversation_history.copy()
+            updated_history.append({"role": "user", "content": enhanced_user_message})
+            updated_history.append({"role": "assistant", "content": answer_with_filter})
+            
+            # Обрабатываем историю для сохранения памяти (аналогично режиму compare)
+            goal_formulated = is_goal_formulated(answer)
+            
+            if goal_formulated:
+                clear_memory(user_id)
+                logger.info("Цель сформулирована, память очищена (режим сравнения с фильтром)")
+            else:
+                recent_messages.append({"role": "user", "content": user_message})
+                recent_messages.append({"role": "assistant", "content": answer})
+                message_count += 1
+                
+                if message_count >= MESSAGES_BEFORE_SUMMARY:
+                    history_to_summarize = []
+                    if summary:
+                        history_to_summarize.append({
+                            "role": "user",
+                            "content": f"Контекст предыдущих диалогов: {summary}"
+                        })
+                        history_to_summarize.append({
+                            "role": "assistant",
+                            "content": "Понял, продолжаю диалог с учетом этого контекста."
+                        })
+                    history_to_summarize.extend(recent_messages)
+                    
+                    new_summary = await summarize_conversation(history_to_summarize, model, context.bot)
+                    
+                    if new_summary and new_summary.strip():
+                        if summary:
+                            combined_summary = f"{summary}\n\n{new_summary}"
+                        else:
+                            combined_summary = new_summary
+                        summary = combined_summary
+                        recent_messages = []
+                        message_count = 0
+                        logger.info(f"Выполнена саммаризация для пользователя {user_id}")
+                    else:
+                        if len(recent_messages) > MAX_RECENT_MESSAGES:
+                            recent_messages = recent_messages[-MAX_RECENT_MESSAGES:]
+                        message_count = 0
+                
+                memory_data = {
+                    "summary": summary,
+                    "recent_messages": recent_messages,
+                    "message_count": message_count
+                }
+                save_memory_to_disk(user_id, memory_data)
+            
+            return  # Выходим, так как уже отправили все результаты
+            
+        elif rag_mode == 'compare':
             # Режим сравнения: получаем оба ответа и сравниваем
             from rag import compare_rag_vs_no_rag
             
@@ -519,7 +634,10 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 model,
                 max_tokens,
                 context.bot,
-                tools=mcp_tools if mcp_tools else None
+                tools=mcp_tools if mcp_tools else None,
+                relevance_threshold=relevance_threshold,
+                rerank_method=rerank_method,
+                use_filter=(relevance_threshold is not None)
             )
         else:
             # Режим без RAG (off или не установлен): используем обычный запрос
