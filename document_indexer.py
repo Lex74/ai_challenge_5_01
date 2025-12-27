@@ -363,30 +363,119 @@ def check_ollama_available() -> bool:
         return False
 
 
-def get_embeddings_batch(texts: List[str], model: str = EMBEDDING_MODEL, batch_size: int = 10) -> List[Optional[List[float]]]:
-    """Получает эмбеддинги для списка текстов через OLLama API
+def get_embeddings_batch_openai(texts: List[str], model: str = None, batch_size: int = 100) -> List[Optional[List[float]]]:
+    """Получает эмбеддинги для списка текстов через OpenAI API (батчевая обработка)
     
-    OLLama не поддерживает батч-обработку, поэтому обрабатываем последовательно порциями
+    OpenAI поддерживает до 2048 текстов за один запрос, но мы ограничиваем batch_size
+    
+    Args:
+        texts: Список текстов для получения эмбеддингов
+        model: Модель для генерации эмбеддингов (если None, используется OPENAI_EMBEDDING_MODEL)
+        batch_size: Размер порции для обработки
+    
+    Returns:
+        Список эмбеддингов (может содержать None для текстов, для которых не удалось получить эмбеддинг)
+    """
+    from config import OPENAI_API_KEY
+    
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY не установлен")
+        return [None] * len(texts)
+    
+    if model is None:
+        model = OPENAI_EMBEDDING_MODEL
+    
+    embeddings = []
+    total = len(texts)
+    
+    logger.info(f"Начинаю генерацию эмбеддингов через OpenAI для {total} текстов (модель: {model})...")
+    
+    headers = {
+        "Authorization": f"Bearer {OPENAI_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    
+    for batch_start in range(0, total, batch_size):
+        batch_end = min(batch_start + batch_size, total)
+        batch_texts = texts[batch_start:batch_end]
+        batch_num = batch_start // batch_size + 1
+        total_batches = (total + batch_size - 1) // batch_size
+        
+        logger.info(f"Обрабатываю батч {batch_num}/{total_batches}: тексты {batch_start+1}-{batch_end}")
+        
+        # Обрезаем слишком длинные тексты
+        processed_texts = []
+        for text in batch_texts:
+            if len(text) > 8000:
+                text = text[:8000]
+            processed_texts.append(text)
+        
+        payload = {
+            "model": model,
+            "input": processed_texts
+        }
+        
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/embeddings",
+                json=payload,
+                headers=headers,
+                timeout=120
+            )
+            response.raise_for_status()
+            
+            data = response.json()
+            
+            # OpenAI возвращает эмбеддинги в порядке индексов
+            batch_embeddings = [None] * len(batch_texts)
+            for item in data.get('data', []):
+                idx = item.get('index', 0)
+                if idx < len(batch_embeddings):
+                    batch_embeddings[idx] = item.get('embedding')
+            
+            embeddings.extend(batch_embeddings)
+            
+            # Небольшая задержка между батчами
+            if batch_end < total:
+                time.sleep(0.2)
+                
+        except Exception as e:
+            logger.error(f"Ошибка при получении эмбеддингов через OpenAI: {e}")
+            embeddings.extend([None] * len(batch_texts))
+    
+    successful = sum(1 for e in embeddings if e is not None)
+    logger.info(f"Получено {successful} эмбеддингов из {total} текстов через OpenAI")
+    return embeddings
+
+
+def get_embeddings_batch(texts: List[str], model: str = EMBEDDING_MODEL, batch_size: int = 10, use_openai: bool = False) -> List[Optional[List[float]]]:
+    """Получает эмбеддинги для списка текстов через OLLama API или OpenAI
     
     Args:
         texts: Список текстов для получения эмбеддингов
         model: Модель для генерации эмбеддингов
         batch_size: Размер порции для обработки (для логирования прогресса)
+        use_openai: Использовать OpenAI вместо OLLama
     
     Returns:
         Список эмбеддингов (может содержать None для текстов, для которых не удалось получить эмбеддинг)
     """
+    # Если указано использовать OpenAI, используем батчевую обработку OpenAI
+    if use_openai:
+        return get_embeddings_batch_openai(texts, batch_size=100)
+    
+    # Иначе используем OLLama (последовательная обработка)
     embeddings = []
     total = len(texts)
     
-    logger.info(f"Начинаю генерацию эмбеддингов для {total} текстов...")
+    logger.info(f"Начинаю генерацию эмбеддингов через OLLama для {total} текстов...")
     
     for i, text in enumerate(texts):
         # Логируем прогресс каждые batch_size элементов
         if i % batch_size == 0 or i == total - 1:
             logger.info(f"Обработано {i+1}/{total} текстов ({(i+1)/total*100:.1f}%)")
         
-        embedding = get_embedding(text, model)
+        embedding = get_embedding(text, model, use_openai_fallback=False)
         embeddings.append(embedding)
         
         # Небольшая задержка между запросами, чтобы не перегружать OLLama
@@ -421,7 +510,7 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     return dot_product / (magnitude1 * magnitude2)
 
 
-def index_documents(file_paths: List[str], source_name: Optional[str] = None, process_in_batches: bool = True, batch_size: int = 50, chunk_size: Optional[int] = None, chunk_overlap: Optional[int] = None, store_text: bool = True) -> Dict[str, Any]:
+def index_documents(file_paths: List[str], source_name: Optional[str] = None, process_in_batches: bool = True, batch_size: int = 50, chunk_size: Optional[int] = None, chunk_overlap: Optional[int] = None, store_text: bool = True, use_openai: bool = False) -> Dict[str, Any]:
     """Индексирует документы: разбивает на чанки и генерирует эмбеддинги
     
     Args:
@@ -429,6 +518,10 @@ def index_documents(file_paths: List[str], source_name: Optional[str] = None, pr
         source_name: Имя источника (если None, используется имя первого файла)
         process_in_batches: Обрабатывать чанки порциями для экономии памяти
         batch_size: Размер порции для обработки эмбеддингов
+        chunk_size: Размер чанка в символах
+        chunk_overlap: Размер перекрытия между чанками
+        store_text: Сохранять ли текст чанков в индексе
+        use_openai: Использовать OpenAI эмбеддинги вместо OLLama
     
     Returns:
         Словарь с индексом:
@@ -437,39 +530,51 @@ def index_documents(file_paths: List[str], source_name: Optional[str] = None, pr
     """
     ensure_index_dir()
     
-    # Проверяем доступность OLLama перед началом
-    logger.info("Проверяю доступность OLLama...")
-    if not check_ollama_available():
-        error_msg = (
-            f"\n❌ OLLama недоступен по адресу {OLLAMA_API_URL}\n\n"
-            f"Для решения проблемы:\n"
-            f"1. Убедитесь, что OLLama запущен: ollama serve\n"
-            f"2. Проверьте, что модель установлена: ollama pull {EMBEDDING_MODEL}\n"
-            f"3. Проверьте доступность: curl {OLLAMA_API_URL.replace('/api/embeddings', '/api/tags')}\n"
-        )
-        logger.error(error_msg)
-        raise ConnectionError(error_msg)
+    # Определяем модель и размерность в зависимости от провайдера
+    if use_openai:
+        embedding_model = OPENAI_EMBEDDING_MODEL
+        embedding_dim = OPENAI_EMBEDDING_DIM.get(embedding_model, 1536)
+        logger.info(f"Используем OpenAI эмбеддинги: {embedding_model} (dim={embedding_dim})")
+    else:
+        embedding_model = EMBEDDING_MODEL
+        embedding_dim = EMBEDDING_DIM
+        # Проверяем доступность OLLama перед началом
+        logger.info("Проверяю доступность OLLama...")
+        if not check_ollama_available():
+            error_msg = (
+                f"\n❌ OLLama недоступен по адресу {OLLAMA_API_URL}\n\n"
+                f"Для решения проблемы:\n"
+                f"1. Убедитесь, что OLLama запущен: ollama serve\n"
+                f"2. Проверьте, что модель установлена: ollama pull {EMBEDDING_MODEL}\n"
+                f"3. Проверьте доступность: curl {OLLAMA_API_URL.replace('/api/embeddings', '/api/tags')}\n"
+                f"\nИли используйте флаг --use-openai для индексации через OpenAI"
+            )
+            logger.error(error_msg)
+            raise ConnectionError(error_msg)
     
-    # Предварительно загружаем модель в память OLLama, чтобы избежать задержек и проблем с памятью
-    logger.info("Предзагружаю модель в память OLLama (тестовый запрос)...")
+    # Предварительно загружаем модель в память (только для OLLama)
     import sys
-    sys.stdout.flush()
-    try:
-        logger.info("Отправляю тестовый запрос к OLLama...")
+    if not use_openai:
+        logger.info("Предзагружаю модель в память OLLama (тестовый запрос)...")
         sys.stdout.flush()
-        test_embedding = get_embedding("test", EMBEDDING_MODEL)
-        sys.stdout.flush()
-        if test_embedding:
-            logger.info(f"Модель успешно загружена, размерность эмбеддинга: {len(test_embedding)}")
-        else:
-            logger.warning("Не удалось получить тестовый эмбеддинг, но продолжаю работу")
-        sys.stdout.flush()
-    except MemoryError as e:
-        logger.error(f"Нехватка памяти при предзагрузке модели: {e}")
-        raise
-    except Exception as e:
-        logger.warning(f"Не удалось предзагрузить модель: {e}, но продолжаю работу")
-        sys.stdout.flush()
+        try:
+            logger.info("Отправляю тестовый запрос к OLLama...")
+            sys.stdout.flush()
+            test_embedding = get_embedding("test", EMBEDDING_MODEL, use_openai_fallback=False)
+            sys.stdout.flush()
+            if test_embedding:
+                logger.info(f"Модель успешно загружена, размерность эмбеддинга: {len(test_embedding)}")
+            else:
+                logger.warning("Не удалось получить тестовый эмбеддинг, но продолжаю работу")
+            sys.stdout.flush()
+        except MemoryError as e:
+            logger.error(f"Нехватка памяти при предзагрузке модели: {e}")
+            raise
+        except Exception as e:
+            logger.warning(f"Не удалось предзагрузить модель: {e}, но продолжаю работу")
+            sys.stdout.flush()
+    else:
+        logger.info("Используем OpenAI эмбеддинги, пропускаем предзагрузку OLLama")
     
     if not file_paths:
         raise ValueError("Не указаны файлы для индексации")
@@ -548,7 +653,7 @@ def index_documents(file_paths: List[str], source_name: Optional[str] = None, pr
             
             # Генерируем эмбеддинги для порции
             chunk_texts = [chunk['text'] for chunk in batch_chunks]
-            embeddings = get_embeddings_batch(chunk_texts, batch_size=10)
+            embeddings = get_embeddings_batch(chunk_texts, batch_size=10, use_openai=use_openai)
             
             # Добавляем эмбеддинги к чанкам
             batch_indexed = 0
@@ -572,7 +677,7 @@ def index_documents(file_paths: List[str], source_name: Optional[str] = None, pr
     else:
         # Обрабатываем все сразу (для небольших объемов)
         chunk_texts = [chunk['text'] for chunk in all_chunks]
-        embeddings = get_embeddings_batch(chunk_texts)
+        embeddings = get_embeddings_batch(chunk_texts, use_openai=use_openai)
         
         # Добавляем эмбеддинги к чанкам
         for chunk, embedding in zip(all_chunks, embeddings):
@@ -596,8 +701,9 @@ def index_documents(file_paths: List[str], source_name: Optional[str] = None, pr
             "total_chunks": len(indexed_chunks),
             "chunk_size": chunk_size if chunk_size is not None else CHUNK_SIZE,
             "chunk_overlap": chunk_overlap if chunk_overlap is not None else CHUNK_OVERLAP,
-            "embedding_model": EMBEDDING_MODEL,
-            "embedding_dim": EMBEDDING_DIM
+            "embedding_model": embedding_model,
+            "embedding_dim": embedding_dim,
+            "embedding_provider": "openai" if use_openai else "ollama"
         }
     }
     
@@ -668,10 +774,29 @@ def search_index(query: str, index: Dict[str, Any], top_k: int = 5) -> List[Dict
         logger.warning("Индекс пуст или некорректен")
         return []
     
-    # Получаем эмбеддинг для запроса (с fallback на OpenAI)
-    query_embedding = get_embedding(query, use_openai_fallback=True)
+    # Определяем провайдер эмбеддингов из метаданных индекса
+    metadata = index.get('metadata', {})
+    embedding_provider = metadata.get('embedding_provider', 'ollama')
+    embedding_model = metadata.get('embedding_model', EMBEDDING_MODEL)
+    
+    logger.info(f"Индекс создан с провайдером: {embedding_provider}, модель: {embedding_model}")
+    
+    # Получаем эмбеддинг для запроса, используя тот же провайдер, что и для индекса
+    if embedding_provider == 'openai':
+        query_embedding = get_embedding_openai(query)
+        if query_embedding is None:
+            logger.warning("Не удалось получить эмбеддинг через OpenAI")
+            return []
+    else:
+        # Используем OLLama с fallback на OpenAI (для обратной совместимости старых индексов)
+        query_embedding = get_embedding(query, use_openai_fallback=False)
+        if query_embedding is None:
+            logger.warning("OLLama недоступен. Индекс создан с OLLama эмбеддингами.")
+            logger.warning("Переиндексируйте документы с --use-openai или запустите OLLama.")
+            return []
+    
     if query_embedding is None:
-        logger.warning("Не удалось получить эмбеддинг для запроса (OLLama и OpenAI недоступны или произошла ошибка)")
+        logger.warning("Не удалось получить эмбеддинг для запроса")
         return []
     
     # Проверяем размерность эмбеддингов в индексе
@@ -694,17 +819,12 @@ def search_index(query: str, index: Dict[str, Any], top_k: int = 5) -> List[Dict
     # Проверяем совместимость размерностей
     query_embedding_dim = len(query_embedding)
     if query_embedding_dim != index_embedding_dim:
-        logger.warning(
+        logger.error(
             f"Размерности эмбеддингов не совпадают: запрос={query_embedding_dim}, индекс={index_embedding_dim}. "
-            f"Результаты могут быть неточными. Рекомендуется пересоздать индекс с той же моделью эмбеддингов."
+            f"Эмбеддинги от разных моделей несовместимы! "
+            f"Переиндексируйте документы с тем же провайдером эмбеддингов."
         )
-        # Можно попробовать обрезать или дополнить, но лучше просто предупредить
-        # Для простоты просто используем как есть - косинусное сходство все равно можно вычислить
-        # если обрезать до минимальной размерности
-        min_dim = min(query_embedding_dim, index_embedding_dim)
-        if query_embedding_dim > min_dim:
-            query_embedding = query_embedding[:min_dim]
-            logger.info(f"Обрезал эмбеддинг запроса до {min_dim} размерности")
+        return []
     
     # Вычисляем сходство с каждым чанком
     results = []
@@ -714,15 +834,7 @@ def search_index(query: str, index: Dict[str, Any], top_k: int = 5) -> List[Dict
             continue
         
         chunk_embedding = chunk['embedding']
-        # Обрезаем до минимальной размерности, если нужно
-        if len(chunk_embedding) != len(query_embedding):
-            min_dim = min(len(chunk_embedding), len(query_embedding))
-            chunk_embedding = chunk_embedding[:min_dim]
-            query_emb = query_embedding[:min_dim]
-        else:
-            query_emb = query_embedding
-        
-        similarity = cosine_similarity(query_emb, chunk_embedding)
+        similarity = cosine_similarity(query_embedding, chunk_embedding)
         results.append({
             'chunk': chunk,
             'similarity': similarity,

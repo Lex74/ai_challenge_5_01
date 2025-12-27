@@ -389,8 +389,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
                 logger.info("Добавлено явное указание использовать News инструмент в запросе пользователя")
         
-        # Проверяем режим RAG
-        rag_mode = context.user_data.get('rag_mode', 'off')
+        # Проверяем режим RAG (по умолчанию включен)
+        rag_mode = context.user_data.get('rag_mode', 'on')
         
         # Получаем настройки фильтрации и реранкинга
         relevance_threshold = context.user_data.get('rag_relevance_threshold')
@@ -624,9 +624,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         elif rag_mode == 'on':
             # Режим с RAG: используем query_with_rag
-            from rag import query_with_rag
+            from rag import query_with_rag, format_sources_for_display
             
-            answer, updated_history = await query_with_rag(
+            answer, updated_history, sources = await query_with_rag(
                 enhanced_user_message,
                 full_conversation_history,
                 full_system_prompt,
@@ -651,6 +651,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 context.bot,
                 tools=mcp_tools if mcp_tools else None
             )
+            sources = []  # Нет источников в режиме без RAG
         
         # Удаляем сообщение "Думаю..."
         await thinking_message.delete()
@@ -917,6 +918,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(formatted_answer[4000:], parse_mode='HTML')
             else:
                 await update.message.reply_text(formatted_answer, parse_mode='HTML')
+        
+        # Выводим источники, если они есть (только для режима RAG)
+        if sources and rag_mode == 'on':
+            sources_text = format_sources_for_display(sources)
+            if sources_text:
+                sources_formatted = utils.convert_markdown_to_telegram(sources_text)
+                await update.message.reply_text(sources_formatted, parse_mode='HTML')
             
     except Exception as e:
         logger.error(f"Ошибка при обработке сообщения: {e}")

@@ -111,6 +111,43 @@ def rerank_results(
         return rerank_results(results, query, method="similarity")
 
 
+def format_sources_for_display(sources: List[Dict[str, Any]]) -> str:
+    """Форматирует источники для отображения пользователю
+    
+    Args:
+        sources: Список источников с ключами source_file, similarity, text
+        
+    Returns:
+        Отформатированная строка с источниками в формате markdown
+    """
+    if not sources:
+        return ""
+    
+    source_parts = []
+    source_parts.append("📚 **Источники:**\n")
+    
+    # Группируем источники по файлам
+    sources_by_file = {}
+    for i, source in enumerate(sources, 1):
+        file_name = source.get('source_file', 'Неизвестный источник')
+        if file_name not in sources_by_file:
+            sources_by_file[file_name] = []
+        sources_by_file[file_name].append({
+            'index': i,
+            'similarity': source.get('similarity', 0.0),
+            'text': source.get('text', '')
+        })
+    
+    # Форматируем по файлам
+    for file_name, file_sources in sources_by_file.items():
+        source_parts.append(f"📄 **{file_name}**")
+        for source_info in file_sources:
+            similarity = source_info['similarity']
+            source_parts.append(f"  • Релевантность: {similarity:.3f}")
+    
+    return "\n".join(source_parts)
+
+
 def format_chunks_for_context(chunks: List[Dict[str, Any]]) -> str:
     """Форматирует найденные чанки для включения в контекст LLM
     
@@ -177,7 +214,7 @@ async def query_with_rag(
     relevance_threshold: Optional[float] = None,
     rerank_method: Optional[str] = None,
     use_filter: bool = True
-) -> Tuple[str, list]:
+) -> Tuple[str, list, List[Dict[str, Any]]]:
     """Отправляет запрос к LLM с использованием RAG
     
     Процесс:
@@ -204,14 +241,15 @@ async def query_with_rag(
         use_filter: Использовать ли фильтрацию по порогу
     
     Returns:
-        Кортеж (ответ, обновленная история)
+        Кортеж (ответ, обновленная история, источники)
+        Источники - список словарей с ключами: source_file, similarity, text
     """
     # Загружаем индекс
     index = load_index(index_path)
     
     if not index:
         logger.warning("Индекс не найден, используем обычный запрос без RAG")
-        return await query_openai(
+        answer, history = await query_openai(
             question,
             conversation_history,
             system_prompt,
@@ -221,6 +259,7 @@ async def query_with_rag(
             bot,
             tools
         )
+        return answer, history, []
     
     # Ищем релевантные чанки
     logger.info(f"Ищу релевантные чанки для вопроса: {question[:100]}...")
@@ -233,7 +272,7 @@ async def query_with_rag(
     
     if not search_results:
         logger.info("Релевантные чанки не найдены или OLLama недоступен, используем обычный запрос без RAG")
-        return await query_openai(
+        answer, history = await query_openai(
             question,
             conversation_history,
             system_prompt,
@@ -243,6 +282,7 @@ async def query_with_rag(
             bot,
             tools
         )
+        return answer, history, []
     
     # Применяем фильтрацию по порогу релевантности, если включена
     if use_filter and relevance_threshold is not None:
@@ -259,7 +299,7 @@ async def query_with_rag(
     
     if not search_results:
         logger.info("После фильтрации не осталось релевантных чанков, используем обычный запрос без RAG")
-        return await query_openai(
+        answer, history = await query_openai(
             question,
             conversation_history,
             system_prompt,
@@ -269,6 +309,7 @@ async def query_with_rag(
             bot,
             tools
         )
+        return answer, history, []
     
     # Форматируем контекст из чанков
     context = format_chunks_for_context(search_results)
@@ -278,7 +319,7 @@ async def query_with_rag(
     rag_prompt = build_rag_prompt(question, context)
     
     # Отправляем запрос к LLM
-    return await query_openai(
+    answer, history = await query_openai(
         rag_prompt,
         conversation_history,
         system_prompt,
@@ -288,6 +329,19 @@ async def query_with_rag(
         bot,
         tools
     )
+    
+    # Формируем список источников из search_results
+    sources = []
+    for result in search_results:
+        chunk = result.get('chunk', {})
+        source_info = {
+            'source_file': chunk.get('source_file', 'Неизвестный источник'),
+            'similarity': result.get('similarity', 0.0),
+            'text': chunk.get('text', '')[:200] + '...' if len(chunk.get('text', '')) > 200 else chunk.get('text', '')
+        }
+        sources.append(source_info)
+    
+    return answer, history, sources
 
 
 async def compare_rag_with_and_without_filter(
@@ -332,7 +386,7 @@ async def compare_rag_with_and_without_filter(
     
     # Получаем ответ без фильтра
     logger.info("Получаю ответ без фильтрации...")
-    answer_without_filter, history_without_filter = await query_with_rag(
+    answer_without_filter, history_without_filter, _ = await query_with_rag(
         question,
         conversation_history,
         system_prompt,
@@ -350,7 +404,7 @@ async def compare_rag_with_and_without_filter(
     
     # Получаем ответ с фильтром
     logger.info(f"Получаю ответ с фильтрацией (порог: {relevance_threshold})...")
-    answer_with_filter, history_with_filter = await query_with_rag(
+    answer_with_filter, history_with_filter, _ = await query_with_rag(
         question,
         conversation_history,
         system_prompt,
@@ -461,7 +515,7 @@ async def compare_rag_vs_no_rag(
     
     # Получаем ответ с RAG
     logger.info("Получаю ответ с RAG...")
-    answer_with_rag, history_with_rag = await query_with_rag(
+    answer_with_rag, history_with_rag, _ = await query_with_rag(
         question,
         conversation_history,
         system_prompt,

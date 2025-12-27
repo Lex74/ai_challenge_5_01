@@ -60,6 +60,11 @@ def main():
         action='store_true',
         help='Не сохранять текст чанков в индексе (экономия памяти, но результаты поиска будут без текста)'
     )
+    parser.add_argument(
+        '--use-openai',
+        action='store_true',
+        help='Использовать OpenAI эмбеддинги вместо OLLama (требует OPENAI_API_KEY)'
+    )
     
     args = parser.parse_args()
     
@@ -90,19 +95,33 @@ def main():
     logger.info(f"Начинаю индексацию {len(file_paths)} файлов...")
     logger.info(f"Файлы: {', '.join(file_paths)}")
     
-    # Проверяем доступность OLLama заранее
-    try:
-        from document_indexer import check_ollama_available
-        logger.info("Проверяю доступность OLLama...")
-        if not check_ollama_available():
-            print("\n❌ OLLama недоступен или модель не установлена!")
-            print(f"   Проверьте: curl {os.getenv('OLLAMA_API_URL', 'http://localhost:11434')}/api/tags")
-            print(f"   Установите модель: ollama pull nomic-embed-text")
+    # Проверяем доступность эмбеддинг провайдера
+    use_openai = args.use_openai
+    
+    if use_openai:
+        # Проверяем наличие OPENAI_API_KEY
+        from config import OPENAI_API_KEY
+        if not OPENAI_API_KEY:
+            print("\n❌ OPENAI_API_KEY не установлен!")
+            print("   Добавьте OPENAI_API_KEY в файл .env")
             sys.exit(1)
-    except Exception as e:
-        logger.error(f"Ошибка при проверке OLLama: {e}")
-        print(f"\n❌ Ошибка при проверке OLLama: {e}")
-        sys.exit(1)
+        print(f"\n✅ Используем OpenAI эмбеддинги (text-embedding-3-small)")
+    else:
+        # Проверяем доступность OLLama
+        try:
+            from document_indexer import check_ollama_available
+            logger.info("Проверяю доступность OLLama...")
+            if not check_ollama_available():
+                print("\n❌ OLLama недоступен или модель не установлена!")
+                print(f"   Проверьте: curl {os.getenv('OLLAMA_API_URL', 'http://localhost:11434')}/api/tags")
+                print(f"   Установите модель: ollama pull nomic-embed-text")
+                print(f"\n   Или используйте флаг --use-openai для индексации через OpenAI")
+                sys.exit(1)
+        except Exception as e:
+            logger.error(f"Ошибка при проверке OLLama: {e}")
+            print(f"\n❌ Ошибка при проверке OLLama: {e}")
+            print(f"   Или используйте флаг --use-openai для индексации через OpenAI")
+            sys.exit(1)
     
     try:
         # Индексируем документы
@@ -122,7 +141,8 @@ def main():
             batch_size=20,
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
-            store_text=not args.no_store_text
+            store_text=not args.no_store_text,
+            use_openai=use_openai
         )
         
         # Сохраняем индекс

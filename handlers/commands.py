@@ -899,8 +899,8 @@ async def rag_mode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def getragmode_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /getragmode для просмотра текущего режима RAG"""
-    # Получаем текущий режим или используем дефолтный (off)
-    current_mode = context.user_data.get('rag_mode', 'off')
+    # Получаем текущий режим или используем дефолтный (on)
+    current_mode = context.user_data.get('rag_mode', 'on')
     is_default = 'rag_mode' not in context.user_data
     
     mode_names = {
