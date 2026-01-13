@@ -6,6 +6,7 @@ from mcp_client import list_notion_tools, call_notion_tool
 from mcp_kinopoisk_client import list_kinopoisk_tools, call_kinopoisk_tool
 from mcp_news_client import list_news_tools, call_news_tool
 from mcp_logs_client import list_logs_tools, call_logs_tool
+from mcp_git_client import list_git_tools, call_git_tool
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,44 @@ def _convert_mcp_tool_to_openai_format(mcp_tool: Dict[str, Any], server_prefix: 
                 "ОБЯЗАТЕЛЬНО используй этот инструмент, когда пользователь просит показать логи бота, "
                 "посмотреть логи, проверить логи или любые запросы, связанные с логами telegram-бота. "
                 f"Этот инструмент получает последние логи из journalctl для сервиса telegram-bot.service. {description}"
+            )
+    
+    # Улучшаем описание для Git инструментов
+    if server_prefix == "git":
+        if "branch" in name.lower() or "ветка" in description.lower() or "get_current_branch" in name.lower():
+            description = (
+                "ОБЯЗАТЕЛЬНО используй этот инструмент, когда пользователь спрашивает о текущей ветке git, "
+                "активной ветке, ветке репозитория или любых вопросах, связанных с ветками git. "
+                "Этот инструмент получает название текущей ветки git репозитория. "
+                f"{description}"
+            )
+        elif "status" in name.lower() or "статус" in description.lower() or "get_git_status" in name.lower():
+            description = (
+                "ОБЯЗАТЕЛЬНО используй этот инструмент, когда пользователь спрашивает о статусе git, "
+                "измененных файлах, состоянии репозитория или любых вопросах о статусе git. "
+                "Этот инструмент получает статус git репозитория (измененные, добавленные, удаленные файлы). "
+                f"{description}"
+            )
+        elif "file" in name.lower() or "файл" in description.lower() or "get_file_content" in name.lower() or "get_open_files" in name.lower():
+            description = (
+                "ОБЯЗАТЕЛЬНО используй этот инструмент, когда пользователь спрашивает о файлах в репозитории, "
+                "содержимом файлов, открытых файлах, измененных файлах или любых вопросах о файлах проекта. "
+                "Этот инструмент получает информацию о файлах в git репозитории или их содержимое. "
+                f"{description}"
+            )
+        elif "commit" in name.lower() or "коммит" in description.lower() or "get_recent_commits" in name.lower():
+            description = (
+                "ОБЯЗАТЕЛЬНО используй этот инструмент, когда пользователь спрашивает о коммитах, "
+                "истории коммитов, последних коммитах или любых вопросах о коммитах git. "
+                "Этот инструмент получает информацию о коммитах в git репозитории. "
+                f"{description}"
+            )
+        elif "diff" in name.lower() or "get_diff" in name.lower():
+            description = (
+                "ОБЯЗАТЕЛЬНО используй этот инструмент, когда пользователь спрашивает о различиях в файлах, "
+                "diff, изменениях в коде или любых вопросах о различиях в git репозитории. "
+                "Этот инструмент получает различия (diff) в git репозитории. "
+                f"{description}"
             )
     
     # Преобразуем inputSchema в parameters для OpenAI
@@ -215,6 +254,22 @@ async def get_all_mcp_tools() -> List[Dict[str, Any]]:
     except Exception as e:
         logger.error(f"Не удалось получить инструменты Logs MCP: {e}", exc_info=True)
     
+    # Получаем инструменты Git
+    try:
+        git_tools = await list_git_tools()
+        logger.info(f"Получено {len(git_tools)} инструментов Git MCP")
+        if git_tools:
+            for tool in git_tools:
+                tool_name = tool.get('name', 'unknown')
+                logger.info(f"Обрабатываю Git инструмент: {tool_name}")
+                openai_tool = _convert_mcp_tool_to_openai_format(tool, "git")
+                openai_tools.append(openai_tool)
+                logger.info(f"Git инструмент {tool_name} преобразован в OpenAI формат как git_{tool_name}")
+        else:
+            logger.warning("Список инструментов Git MCP пуст. Проверьте путь к серверу.")
+    except Exception as e:
+        logger.error(f"Не удалось получить инструменты Git MCP: {e}", exc_info=True)
+    
     # Кэшируем результат
     _cached_tools = openai_tools
     logger.info(f"Всего доступно {len(openai_tools)} MCP инструментов для LLM")
@@ -266,8 +321,13 @@ async def call_mcp_tool(tool_name: str, arguments: Dict[str, Any]) -> Optional[s
             result = await call_logs_tool(actual_tool_name, arguments)
             logger.info(f"Logs MCP инструмент {actual_tool_name} вернул результат (длина: {len(str(result)) if result else 0})")
             return result
+        elif server_prefix == "git":
+            logger.info(f"Вызываю Git MCP инструмент: {actual_tool_name}")
+            result = await call_git_tool(actual_tool_name, arguments)
+            logger.info(f"Git MCP инструмент {actual_tool_name} вернул результат (длина: {len(str(result)) if result else 0})")
+            return result
         else:
-            logger.error(f"Неизвестный префикс сервера: {server_prefix}. Ожидается 'notion', 'kinopoisk', 'news' или 'logs'")
+            logger.error(f"Неизвестный префикс сервера: {server_prefix}. Ожидается 'notion', 'kinopoisk', 'news', 'logs' или 'git'")
             return None
     except Exception as e:
         logger.error(f"Ошибка при вызове MCP инструмента {tool_name}: {e}", exc_info=True)

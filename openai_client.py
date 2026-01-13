@@ -233,10 +233,27 @@ async def query_openai(
                         if tool_result is None:
                             tool_result = "Ошибка при вызове инструмента"
                         
+                        # Логируем результат для отладки
+                        logger.info(f"Результат от инструмента {tool_name}: {str(tool_result)[:200]}")
+                        
                         # Если это logs инструмент, форматируем результат в моноширинный формат
                         if tool_name.startswith("logs_"):
                             # Обертываем логи в markdown code блок для моноширинного отображения
                             tool_result = f"```\n{tool_result}\n```"
+                        
+                        # Если это git инструмент, убеждаемся, что результат понятен
+                        if tool_name.startswith("git_"):
+                            # Улучшаем форматирование результата для лучшего понимания LLM
+                            if tool_result and len(str(tool_result).strip()) > 0:
+                                # Если результат короткий, добавляем контекст
+                                result_str = str(tool_result).strip()
+                                if len(result_str) < 50:
+                                    # Для коротких результатов добавляем пояснение
+                                    tool_result = f"Результат выполнения команды git:\n{result_str}"
+                                else:
+                                    tool_result = result_str
+                            else:
+                                tool_result = "Инструмент выполнен, но не вернул результат"
                         
                         # Добавляем результат в список
                         tool_results.append({

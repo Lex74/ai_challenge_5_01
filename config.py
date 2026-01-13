@@ -68,6 +68,18 @@ MCP_LOGS_ARGS = (
     else [_logs_mcp_server]
 )
 
+# Локальный MCP сервер Git (Python)
+# Вычисляем абсолютный путь относительно текущего файла
+_git_mcp_server = os.path.abspath(os.path.join(_config_dir, 'git_mcp', 'server.py'))
+
+# Используем системный python3 по умолчанию
+MCP_GIT_COMMAND = os.getenv('MCP_GIT_COMMAND', 'python3')
+MCP_GIT_ARGS = (
+    os.getenv('MCP_GIT_ARGS', _git_mcp_server).split()
+    if os.getenv('MCP_GIT_ARGS')
+    else [_git_mcp_server]
+)
+
 # Notion страница для сохранения новостей
 # Page ID извлекается из URL: https://www.notion.so/2ceb45610e4e808984b8d8131d3ccc61
 # Формат: 2ceb45610e4e808984b8d8131d3ccc61 (без дефисов, как в URL)

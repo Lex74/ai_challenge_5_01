@@ -29,6 +29,10 @@ OPENAI_EMBEDDING_DIM = {
 INDEX_DIR = "document_index"
 INDEX_FILE = os.path.join(INDEX_DIR, "index.json")
 
+# Кеш индекса в памяти для оптимизации производительности
+_index_cache = {}
+_index_cache_timestamps = {}
+
 
 def ensure_index_dir():
     """Создает директорию для индекса, если её нет"""
@@ -711,7 +715,7 @@ def index_documents(file_paths: List[str], source_name: Optional[str] = None, pr
 
 
 def save_index(index: Dict[str, Any], file_path: str = INDEX_FILE) -> None:
-    """Сохраняет индекс в JSON файл
+    """Сохраняет индекс в JSON файл и обновляет кеш
     
     Args:
         index: Словарь с индексом
@@ -723,20 +727,31 @@ def save_index(index: Dict[str, Any], file_path: str = INDEX_FILE) -> None:
         with open(file_path, 'w', encoding='utf-8') as f:
             json.dump(index, f, ensure_ascii=False, indent=2)
         logger.info(f"Индекс сохранен в {file_path}")
+        
+        # Обновляем кеш после сохранения
+        global _index_cache, _index_cache_timestamps
+        _index_cache[file_path] = index
+        try:
+            _index_cache_timestamps[file_path] = os.path.getmtime(file_path)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"Ошибка при сохранении индекса: {e}")
         raise
 
 
-def load_index(file_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
-    """Загружает индекс из JSON файла
+def load_index(file_path: Optional[str] = None, use_cache: bool = True) -> Optional[Dict[str, Any]]:
+    """Загружает индекс из JSON файла с кешированием в памяти
     
     Args:
         file_path: Путь к файлу с индексом (если None, используется INDEX_FILE)
+        use_cache: Использовать ли кеш в памяти (по умолчанию True)
     
     Returns:
         Словарь с индексом или None, если файл не найден
     """
+    global _index_cache, _index_cache_timestamps
+    
     try:
         # Если путь не указан, используем дефолтный
         if file_path is None:
@@ -746,13 +761,62 @@ def load_index(file_path: Optional[str] = None) -> Optional[Dict[str, Any]]:
             logger.warning(f"Файл индекса не найден: {file_path}")
             return None
         
+        # Проверяем кеш, если включено кеширование
+        if use_cache and file_path in _index_cache:
+            # Проверяем, не изменился ли файл
+            try:
+                file_mtime = os.path.getmtime(file_path)
+                cached_mtime = _index_cache_timestamps.get(file_path, 0)
+                
+                if file_mtime == cached_mtime:
+                    logger.debug(f"Использую кешированный индекс из {file_path}")
+                    return _index_cache[file_path]
+                else:
+                    logger.info(f"Файл индекса изменился, перезагружаю из {file_path}")
+                    # Удаляем устаревший кеш
+                    del _index_cache[file_path]
+                    del _index_cache_timestamps[file_path]
+            except Exception as e:
+                logger.warning(f"Ошибка при проверке времени модификации файла: {e}, перезагружаю индекс")
+        
+        # Загружаем индекс из файла
         with open(file_path, 'r', encoding='utf-8') as f:
             index = json.load(f)
-        logger.info(f"Индекс загружен из {file_path}")
+        
+        # Сохраняем в кеш
+        if use_cache:
+            _index_cache[file_path] = index
+            try:
+                _index_cache_timestamps[file_path] = os.path.getmtime(file_path)
+            except Exception:
+                pass
+            logger.info(f"Индекс загружен из файла {file_path} и сохранен в кеш")
+        else:
+            logger.info(f"Индекс загружен из файла {file_path} (кеш отключен)")
         return index
     except Exception as e:
         logger.error(f"Ошибка при загрузке индекса: {e}", exc_info=True)
         return None
+
+
+def clear_index_cache(file_path: Optional[str] = None):
+    """Очищает кеш индекса
+    
+    Args:
+        file_path: Путь к файлу индекса (если None, очищает весь кеш)
+    """
+    global _index_cache, _index_cache_timestamps
+    
+    if file_path is None:
+        _index_cache.clear()
+        _index_cache_timestamps.clear()
+        logger.info("Весь кеш индекса очищен")
+    else:
+        if file_path in _index_cache:
+            del _index_cache[file_path]
+        if file_path in _index_cache_timestamps:
+            del _index_cache_timestamps[file_path]
+        logger.info(f"Кеш индекса для {file_path} очищен")
 
 
 def search_index(query: str, index: Dict[str, Any], top_k: int = 5) -> List[Dict[str, Any]]:
