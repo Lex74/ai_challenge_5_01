@@ -26,6 +26,12 @@
 > **Важно:** В некоторых организациях/enterprise окружениях права `GITHUB_TOKEN` могут быть ограничены.
 > Убедитесь, что для workflow разрешены `pull-requests: write`, `statuses: write` и `checks: write`,
 > а также что политика организации не запрещает создание status checks.
+>
+> **Как проверить права `GITHUB_TOKEN`:**
+> 1. В репозитории: `Settings` → `Actions` → `General` → раздел **Workflow permissions**.
+> 2. Убедитесь, что выбрано **Read and write permissions**.
+> 3. В организациях: `Organization Settings` → `Actions` → `Workflow permissions` и убедитесь, что политики не ограничивают запись.
+> 4. Если используется fine-grained token вместо `GITHUB_TOKEN`, добавьте права: `statuses: write`, `checks: write`, `pull-requests: write`.
 
 ### 2. Создание индекса документации (рекомендуется)
 
@@ -169,6 +175,45 @@ python review_pr.py \
   --pr-number 42 \
   --repo myorg/myrepo \
   --skip-rag
+```
+
+### Пример 4: Создание статуса проверки вручную (для отладки)
+
+```python
+from github import Github
+from review_pr import create_status_check
+
+github = Github("YOUR_TOKEN")
+repo_name = "owner/repo"
+head_sha = "abcdef123456"
+
+await create_status_check(
+    github,
+    repo_name,
+    head_sha,
+    state="success",
+    description="Проверка выполнена",
+    context="pr-review/ai-reviewer"
+)
+```
+
+### Пример 5: Создание PR review вручную (для отладки)
+
+```python
+from github import Github
+from review_pr import create_pr_review
+
+github = Github("YOUR_TOKEN")
+repo_name = "owner/repo"
+pr_number = 42
+
+await create_pr_review(
+    github,
+    repo_name,
+    pr_number,
+    review_text="Тестовое ревью",
+    event="COMMENT"
+)
 ```
 
 ## Настройка системного промпта

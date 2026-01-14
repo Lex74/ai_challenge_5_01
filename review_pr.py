@@ -313,13 +313,25 @@ async def create_status_check(
             logger.error("repo_name или head_sha не указаны при создании статуса проверки")
             return False
         repo = github.get_repo(repo_name)
-        repo.get_commit(head_sha).create_status(
+        if repo is None:
+            logger.error("Не удалось получить репозиторий при создании статуса проверки")
+            return False
+        commit = repo.get_commit(head_sha)
+        if commit is None:
+            logger.error("Не удалось получить коммит для статуса проверки (head_sha=%s)", head_sha)
+            return False
+        commit.create_status(
             state=state,
             target_url="",
             description=description,
             context=context
         )
-        logger.info(f"Статус проверки создан: {state} - {description}")
+        logger.info(
+            "Статус проверки создан: state=%s, description=%s, context=%s",
+            state,
+            description,
+            context
+        )
         return True
     except GithubException as e:
         status_code = getattr(e, "status", None)
@@ -342,12 +354,19 @@ async def create_status_check(
         elif status_code == 422:
             logger.error(
                 "Невалидные данные для статуса проверки. "
-                "Проверьте state/description/context."
+                "Проверьте state/description/context (state=%s, context=%s).",
+                state,
+                context
             )
         elif status_code == 429:
             logger.error("Слишком много запросов к GitHub API (rate limit).")
         else:
-            logger.error(f"Ошибка при создании статуса проверки: {e}")
+            logger.error(
+                "Ошибка при создании статуса проверки (state=%s, context=%s): %s",
+                state,
+                context,
+                e
+            )
         return False
     except Exception as e:
         logger.error(f"Неожиданная ошибка при создании статуса проверки: {e}", exc_info=True)
@@ -382,18 +401,9 @@ async def create_pr_review(
     if event not in {"APPROVE", "REQUEST_CHANGES", "COMMENT"}:
         logger.error(f"Некорректный тип PR review: {event}")
         return False
-    if not review_text:
-        logger.warning("Пустой текст ревью при создании PR review")
-        review_text = "Автоматическое ревью не содержит текста."
-
     try:
         repo = github.get_repo(repo_name)
         pr = repo.get_pull(pr_number)
-        
-        # Ограничиваем длину ревью для PR review (65536 символов)
-        max_review_length = 60000
-        if len(review_text) > max_review_length:
-            review_text = review_text[:max_review_length] + "\n\n... (текст обрезан, полное ревью в комментариях)"
         
         pr.create_review(
             body=review_text,
@@ -546,6 +556,8 @@ async def main():
         # Генерируем ревью
         logger.info("Генерирую ревью...")
         review_text = await generate_review(pr_info, diff, rag_context)
+        if not review_text:
+            review_text = "Автоматическое ревью не содержит текста."
         
         # Анализируем ревью на наличие критических проблем
         logger.info("Анализирую ревью на наличие критических проблем...")
@@ -578,19 +590,31 @@ async def main():
             status_description
         )
         
+        # Готовим текст для PR review (ограничиваем длину)
+        max_review_length = 60000
+        if len(review_text) > max_review_length:
+            review_body = review_text[:max_review_length] + "\n\n... (текст обрезан, полное ревью в комментариях)"
+            post_full_comment = True
+        else:
+            review_body = review_text
+            post_full_comment = False
+
         # Создаем PR review (approve/request changes/comment)
         logger.info(f"Создаю PR review: {review_event}")
         review_success = await create_pr_review(
             github,
             repo_name,
             args.pr_number,
-            review_text,
+            review_body,
             review_event
         )
         
-        # Также публикуем комментарий для удобства просмотра
-        logger.info("Публикую комментарий в PR...")
-        comment_success = await post_review_comment(github, repo_name, args.pr_number, review_text)
+        # Публикуем полный комментарий только если review был обрезан
+        if post_full_comment:
+            logger.info("Публикую полный комментарий в PR (review был обрезан)...")
+            comment_success = await post_review_comment(github, repo_name, args.pr_number, review_text)
+        else:
+            comment_success = True
         
         if review_success and comment_success:
             logger.info("✅ Ревью успешно завершено и опубликовано")
