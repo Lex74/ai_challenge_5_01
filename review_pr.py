@@ -201,6 +201,12 @@ def analyze_review_for_critical_issues(review_text: str) -> Dict[str, Any]:
         - has_issues: bool - есть ли любые проблемы
         - critical_count: int - количество критических проблем
     """
+    if review_text is None:
+        return {
+            "has_critical_issues": False,
+            "has_issues": False,
+            "critical_count": 0
+        }
     if not review_text:
         return {
             "has_critical_issues": False,
@@ -208,7 +214,7 @@ def analyze_review_for_critical_issues(review_text: str) -> Dict[str, Any]:
             "critical_count": 0
         }
 
-    review_lower = review_text.lower()
+    review_text = str(review_text)
     
     # Ищем индикаторы критических проблем (regex для точности и нормализации)
     critical_patterns = [
@@ -237,11 +243,12 @@ def analyze_review_for_critical_issues(review_text: str) -> Dict[str, Any]:
         r"❌"
     ]
     
-    has_critical = any(re.search(pattern, review_lower) for pattern in critical_patterns)
-    has_issues = any(re.search(pattern, review_lower) for pattern in issue_patterns)
+    flags = re.IGNORECASE | re.UNICODE
+    has_critical = any(re.search(pattern, review_text, flags) for pattern in critical_patterns)
+    has_issues = any(re.search(pattern, review_text, flags) for pattern in issue_patterns)
     
     # Подсчитываем количество упоминаний критических проблем
-    critical_count = sum(1 for pattern in critical_patterns if re.search(pattern, review_lower))
+    critical_count = sum(1 for pattern in critical_patterns if re.search(pattern, review_text, flags))
     
     # Проверяем наличие раздела "Критические проблемы"
     if "## ⚠️ критические проблемы" in review_text or "## ⚠️ Критические проблемы" in review_text:
@@ -293,6 +300,9 @@ async def create_status_check(
         True если успешно, False в противном случае
     """
     try:
+        if not repo_name or not head_sha:
+            logger.error("repo_name или head_sha не указаны при создании статуса проверки")
+            return False
         repo = github.get_repo(repo_name)
         repo.get_commit(head_sha).create_status(
             state=state,
@@ -304,7 +314,12 @@ async def create_status_check(
         return True
     except GithubException as e:
         status_code = getattr(e, "status", None)
-        if status_code == 403:
+        if status_code == 401:
+            logger.error(
+                "Нет авторизации для создания статуса проверки. "
+                "Проверьте GITHUB_TOKEN."
+            )
+        elif status_code == 403:
             logger.error(
                 "Нет прав на создание статуса проверки. "
                 "Проверьте permissions workflow и права GITHUB_TOKEN."
@@ -314,6 +329,13 @@ async def create_status_check(
                 "Репозиторий или коммит не найден при создании статуса проверки. "
                 "Проверьте repo_name и head_sha."
             )
+        elif status_code == 422:
+            logger.error(
+                "Невалидные данные для статуса проверки. "
+                "Проверьте state/description/context."
+            )
+        elif status_code == 429:
+            logger.error("Слишком много запросов к GitHub API (rate limit).")
         else:
             logger.error(f"Ошибка при создании статуса проверки: {e}")
         return False
@@ -341,8 +363,14 @@ async def create_pr_review(
     Returns:
         True если успешно, False в противном случае
     """
-    if not pr_number:
+    if not repo_name:
+        logger.error("repo_name не указан при создании PR review")
+        return False
+    if not pr_number or not isinstance(pr_number, int) or pr_number <= 0:
         logger.error("Номер PR не указан при создании PR review")
+        return False
+    if event not in {"APPROVE", "REQUEST_CHANGES", "COMMENT"}:
+        logger.error(f"Некорректный тип PR review: {event}")
         return False
     if not review_text:
         logger.warning("Пустой текст ревью при создании PR review")
