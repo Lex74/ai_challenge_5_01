@@ -87,6 +87,13 @@ class TestAnalyzeReviewForCriticalIssues(unittest.TestCase):
         self.assertTrue(result["has_issues"])
         self.assertEqual(result["critical_count"], 1)
 
+    def test_critical_section_without_items(self):
+        review_text = "## ⚠️ Критические проблемы\n"
+        result = analyze_review_for_critical_issues(review_text)
+        self.assertTrue(result["has_critical_issues"])
+        self.assertTrue(result["has_issues"])
+        self.assertEqual(result["critical_count"], 0)
+
     def test_only_general_issues(self):
         review_text = "Есть замечания по стилю и улучшения по читаемости."
         result = analyze_review_for_critical_issues(review_text)

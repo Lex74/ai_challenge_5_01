@@ -2,6 +2,7 @@
 """Скрипт для автоматического ревью Pull Requests с использованием RAG и MCP Git"""
 import argparse
 import asyncio
+import html
 import logging
 import os
 import re
@@ -25,6 +26,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 _REGEX_FLAGS = re.IGNORECASE | re.UNICODE
+
+# Базовая защита от XSS в тексте ревью (GitHub все равно санитизирует, но подстрахуемся)
+_SCRIPT_TAG_REGEX = re.compile(r"<\s*script[^>]*>.*?<\s*/\s*script\s*>", re.IGNORECASE | re.DOTALL)
+_IFRAME_TAG_REGEX = re.compile(r"<\s*iframe[^>]*>.*?<\s*/\s*iframe\s*>", re.IGNORECASE | re.DOTALL)
 
 # Компилируем паттерны один раз для производительности
 _CRITICAL_REGEX = re.compile(
@@ -276,10 +281,9 @@ def analyze_review_for_critical_issues(review_text: str) -> Dict[str, Any]:
                 critical_section = review_text[start:]
             
             # Подсчитываем количество пунктов (маркеры списка)
-            critical_count = critical_section.count("- ") + critical_section.count("* ")
-            if critical_count == 0:
-                # Если секция есть, но списков нет, считаем минимум 1 проблему
-                critical_count = 1
+            list_count = critical_section.count("- ") + critical_section.count("* ")
+            if list_count > 0:
+                critical_count = list_count
     
     return {
         "has_critical_issues": has_critical,
@@ -383,6 +387,16 @@ async def create_status_check(
         return False
 
 
+def sanitize_review_text(review_text: str) -> str:
+    """Удаляет потенциально опасные HTML-теги из текста ревью."""
+    if not review_text:
+        return ""
+    # Удаляем только явно опасные теги, чтобы не ломать markdown и кодовые блоки
+    sanitized = _SCRIPT_TAG_REGEX.sub("", review_text)
+    sanitized = _IFRAME_TAG_REGEX.sub("", sanitized)
+    return sanitized
+
+
 async def create_pr_review(
     github: Github,
     repo_name: str,
@@ -415,8 +429,9 @@ async def create_pr_review(
         repo = github.get_repo(repo_name)
         pr = repo.get_pull(pr_number)
         
+        sanitized_text = sanitize_review_text(review_text)
         pr.create_review(
-            body=review_text,
+            body=sanitized_text,
             event=event
         )
         logger.info(f"PR review создан: {event}")
@@ -455,8 +470,9 @@ async def post_review_comment(github: Github, repo_name: str, pr_number: int, re
         # Если ревью слишком длинное, разбиваем на части
         max_comment_length = 60000  # Оставляем запас
         
-        if len(review_text) <= max_comment_length:
-            pr.create_issue_comment(review_text)
+        sanitized_text = sanitize_review_text(review_text)
+        if len(sanitized_text) <= max_comment_length:
+            pr.create_issue_comment(sanitized_text)
             logger.info("Комментарий с ревью успешно опубликован")
             return True
         else:
@@ -465,7 +481,7 @@ async def post_review_comment(github: Github, repo_name: str, pr_number: int, re
             current_part = ""
             
             # Разбиваем по разделам (по заголовкам ##)
-            sections = review_text.split("\n## ")
+            sections = sanitized_text.split("\n## ")
             if len(sections) > 1:
                 # Первый раздел без заголовка
                 current_part = sections[0]
@@ -480,7 +496,7 @@ async def post_review_comment(github: Github, repo_name: str, pr_number: int, re
                     parts.append(current_part)
             else:
                 # Если нет разделов, разбиваем по абзацам
-                paragraphs = review_text.split("\n\n")
+                paragraphs = sanitized_text.split("\n\n")
                 for para in paragraphs:
                     if len(current_part) + len(para) + 10 > max_comment_length:
                         if current_part:
