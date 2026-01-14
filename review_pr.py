@@ -235,7 +235,12 @@ def analyze_review_for_critical_issues(review_text: str) -> Dict[str, Any]:
             "critical_count": 0
         }
     if not isinstance(review_text, str):
-        review_text = str(review_text)
+        logger.warning("review_text не является строкой; пропускаю анализ критических проблем")
+        return {
+            "has_critical_issues": False,
+            "has_issues": False,
+            "critical_count": 0
+        }
     if not review_text:
         return {
             "has_critical_issues": False,
@@ -326,7 +331,8 @@ async def create_status_check(
         elif status_code == 403:
             logger.error(
                 "Нет прав на создание статуса проверки. "
-                "Проверьте permissions workflow и права GITHUB_TOKEN."
+                "Проверьте permissions workflow (statuses: write, checks: write, pull-requests: write) "
+                "и права GITHUB_TOKEN в настройках организации/репозитория."
             )
         elif status_code == 404:
             logger.error(
