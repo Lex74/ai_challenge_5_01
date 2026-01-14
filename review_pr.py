@@ -4,6 +4,7 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import sys
 from typing import List, Dict, Any, Optional
 
@@ -200,41 +201,47 @@ def analyze_review_for_critical_issues(review_text: str) -> Dict[str, Any]:
         - has_issues: bool - есть ли любые проблемы
         - critical_count: int - количество критических проблем
     """
+    if not review_text:
+        return {
+            "has_critical_issues": False,
+            "has_issues": False,
+            "critical_count": 0
+        }
+
     review_lower = review_text.lower()
     
-    # Ищем индикаторы критических проблем
-    critical_indicators = [
-        "критические проблемы",
-        "критическая проблема",
-        "⚠️ критические",
-        "критично",
-        "обязательно исправить",
-        "требует исправления",
-        "блокирует",
-        "security",
-        "безопасность",
-        "уязвимость",
-        "bug",
-        "ошибка",
-        "exception",
-        "crash"
+    # Ищем индикаторы критических проблем (regex для точности и нормализации)
+    critical_patterns = [
+        r"\bкритическ\w*\s+проблем\w*\b",
+        r"\bкритичн\w*\b",
+        r"⚠️\s*критическ\w*",
+        r"\bобязательно\s+исправить\b",
+        r"\bтребует\s+исправлен\w*\b",
+        r"\bблокир\w*\b",
+        r"\bsecurity\b",
+        r"\bбезопасност\w*\b",
+        r"\bуязвимост\w*\b",
+        r"\bbug\b",
+        r"\bошибк\w*\b",
+        r"\bexception\b",
+        r"\bcrash\b"
     ]
     
     # Ищем любые проблемы
-    issue_indicators = [
-        "проблем",
-        "замечани",
-        "улучшени",
-        "предложени",
-        "⚠️",
-        "❌"
+    issue_patterns = [
+        r"\bпроблем\w*\b",
+        r"\bзамечан\w*\b",
+        r"\bулучшен\w*\b",
+        r"\bпредложен\w*\b",
+        r"⚠️",
+        r"❌"
     ]
     
-    has_critical = any(indicator in review_lower for indicator in critical_indicators)
-    has_issues = any(indicator in review_lower for indicator in issue_indicators)
+    has_critical = any(re.search(pattern, review_lower) for pattern in critical_patterns)
+    has_issues = any(re.search(pattern, review_lower) for pattern in issue_patterns)
     
     # Подсчитываем количество упоминаний критических проблем
-    critical_count = sum(1 for indicator in critical_indicators if indicator in review_lower)
+    critical_count = sum(1 for pattern in critical_patterns if re.search(pattern, review_lower))
     
     # Проверяем наличие раздела "Критические проблемы"
     if "## ⚠️ критические проблемы" in review_text or "## ⚠️ Критические проблемы" in review_text:
@@ -296,7 +303,22 @@ async def create_status_check(
         logger.info(f"Статус проверки создан: {state} - {description}")
         return True
     except GithubException as e:
-        logger.error(f"Ошибка при создании статуса проверки: {e}")
+        status_code = getattr(e, "status", None)
+        if status_code == 403:
+            logger.error(
+                "Нет прав на создание статуса проверки. "
+                "Проверьте permissions workflow и права GITHUB_TOKEN."
+            )
+        elif status_code == 404:
+            logger.error(
+                "Репозиторий или коммит не найден при создании статуса проверки. "
+                "Проверьте repo_name и head_sha."
+            )
+        else:
+            logger.error(f"Ошибка при создании статуса проверки: {e}")
+        return False
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при создании статуса проверки: {e}", exc_info=True)
         return False
 
 
@@ -319,6 +341,13 @@ async def create_pr_review(
     Returns:
         True если успешно, False в противном случае
     """
+    if not pr_number:
+        logger.error("Номер PR не указан при создании PR review")
+        return False
+    if not review_text:
+        logger.warning("Пустой текст ревью при создании PR review")
+        review_text = "Автоматическое ревью не содержит текста."
+
     try:
         repo = github.get_repo(repo_name)
         pr = repo.get_pull(pr_number)
