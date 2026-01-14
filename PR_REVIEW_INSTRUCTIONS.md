@@ -302,6 +302,28 @@ python -c "import asyncio; from mcp_git_client import list_git_tools; print(asyn
 2. Добавлен ли `pr-review/ai-reviewer` в список required checks
 3. Установлен ли статус `failure` (проверьте логи)
 
+## Типичные ошибки и как их исправить
+
+### 401 Unauthorized
+- Причина: отсутствует или недействителен `GITHUB_TOKEN`.
+- Решение: проверьте `Settings` → `Actions` → `General` → `Workflow permissions`.
+
+### 403 Forbidden
+- Причина: недостаточно прав на `pull-requests`, `statuses` или `checks`.
+- Решение: включите **Read and write permissions** для workflow и убедитесь, что политики организации не блокируют запись.
+
+### 404 Not Found
+- Причина: неверный `repo_name`, `pr_number` или `head_sha`.
+- Решение: проверьте параметры запуска и корректность данных PR.
+
+### 422 Unprocessable Entity
+- Причина: некорректные параметры (`state`, `context`, `event`).
+- Решение: убедитесь, что значения валидны. `state` должен быть одним из `success|failure|error|pending`, `event` — `APPROVE|REQUEST_CHANGES|COMMENT`.
+
+### 429 Too Many Requests
+- Причина: превышен лимит GitHub API.
+- Решение: повторите запуск позже или уменьшите частоту вызовов.
+
 ### Q: RAG не находит контекст
 
 **A:** Убедитесь, что:

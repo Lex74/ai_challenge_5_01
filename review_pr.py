@@ -27,29 +27,31 @@ logger = logging.getLogger(__name__)
 _REGEX_FLAGS = re.IGNORECASE | re.UNICODE
 
 # Компилируем паттерны один раз для производительности
-_CRITICAL_PATTERNS = [
-    ("critical_phrase", re.compile(r"\bкритическ\w*\s+проблем\w*\b", _REGEX_FLAGS)),
-    ("critical_word", re.compile(r"\bкритичн\w*\b", _REGEX_FLAGS)),
-    ("critical_emoji", re.compile(r"⚠️\s*критическ\w*", _REGEX_FLAGS)),
-    ("must_fix", re.compile(r"\bобязательно\s+исправить\b", _REGEX_FLAGS)),
-    ("requires_fix", re.compile(r"\bтребует\s+исправлен\w*\b", _REGEX_FLAGS)),
-    ("blocking", re.compile(r"\bблокир\w*\b", _REGEX_FLAGS)),
-    ("security_en", re.compile(r"\bsecurity\b", _REGEX_FLAGS)),
-    ("security_ru", re.compile(r"\bбезопасност\w*\b", _REGEX_FLAGS)),
-    ("vulnerability", re.compile(r"\bуязвимост\w*\b", _REGEX_FLAGS)),
-    ("bug", re.compile(r"\bbug\b", _REGEX_FLAGS)),
-    ("exception", re.compile(r"\bexception\b", _REGEX_FLAGS)),
-    ("crash", re.compile(r"\bcrash\b", _REGEX_FLAGS)),
-]
+_CRITICAL_REGEX = re.compile(
+    r"(?P<critical_phrase>\bкритическ\w*\s+проблем\w*\b)|"
+    r"(?P<critical_word>\bкритичн\w*\b)|"
+    r"(?P<critical_emoji>⚠️\s*критическ\w*)|"
+    r"(?P<must_fix>\bобязательно\s+исправить\b)|"
+    r"(?P<requires_fix>\bтребует\s+исправлен\w*\b)|"
+    r"(?P<blocking>\bблокир\w*\b)|"
+    r"(?P<security_en>\bsecurity\b)|"
+    r"(?P<security_ru>\bбезопасност\w*\b)|"
+    r"(?P<vulnerability>\bуязвимост\w*\b)|"
+    r"(?P<bug>\bbug\b)|"
+    r"(?P<exception>\bexception\b)|"
+    r"(?P<crash>\bcrash\b)",
+    _REGEX_FLAGS
+)
 
-_ISSUE_PATTERNS = [
-    re.compile(r"\bпроблем\w*\b", _REGEX_FLAGS),
-    re.compile(r"\bзамечан\w*\b", _REGEX_FLAGS),
-    re.compile(r"\bулучшен\w*\b", _REGEX_FLAGS),
-    re.compile(r"\bпредложен\w*\b", _REGEX_FLAGS),
-    re.compile(r"⚠️", _REGEX_FLAGS),
-    re.compile(r"❌", _REGEX_FLAGS),
-]
+_ISSUE_REGEX = re.compile(
+    r"\bпроблем\w*\b|"
+    r"\bзамечан\w*\b|"
+    r"\bулучшен\w*\b|"
+    r"\bпредложен\w*\b|"
+    r"⚠️|"
+    r"❌",
+    _REGEX_FLAGS
+)
 
 
 async def get_pr_info(github: Github, repo_name: str, pr_number: int) -> Dict[str, Any]:
@@ -248,13 +250,12 @@ def analyze_review_for_critical_issues(review_text: str) -> Dict[str, Any]:
             "critical_count": 0
         }
     
-    # Ищем индикаторы критических проблем (regex для точности и нормализации)
-    has_critical = any(pattern.search(review_text) for _, pattern in _CRITICAL_PATTERNS)
-    has_issues = any(pattern.search(review_text) for pattern in _ISSUE_PATTERNS)
-    
-    # Подсчитываем количество уникальных категорий критических проблем
-    matched_categories = {name for name, pattern in _CRITICAL_PATTERNS if pattern.search(review_text)}
+    # Ищем индикаторы критических проблем одним проходом по тексту
+    critical_matches = list(_CRITICAL_REGEX.finditer(review_text))
+    matched_categories = {m.lastgroup for m in critical_matches if m.lastgroup}
     critical_count = len(matched_categories)
+    has_critical = critical_count > 0
+    has_issues = has_critical or _ISSUE_REGEX.search(review_text) is not None
     
     # Проверяем наличие раздела "Критические проблемы"
     if "## ⚠️ критические проблемы" in review_text or "## ⚠️ Критические проблемы" in review_text:
@@ -316,6 +317,15 @@ async def create_status_check(
         if repo is None:
             logger.error("Не удалось получить репозиторий при создании статуса проверки")
             return False
+        permissions = getattr(repo, "permissions", None)
+        if isinstance(permissions, dict):
+            if not (permissions.get("admin") or permissions.get("push")):
+                logger.error(
+                    "Недостаточно прав для создания статуса проверки. "
+                    "Требуются права admin/push. Текущие права: %s",
+                    permissions
+                )
+                return False
         commit = repo.get_commit(head_sha)
         if commit is None:
             logger.error("Не удалось получить коммит для статуса проверки (head_sha=%s)", head_sha)
@@ -412,7 +422,26 @@ async def create_pr_review(
         logger.info(f"PR review создан: {event}")
         return True
     except GithubException as e:
-        logger.error(f"Ошибка при создании PR review: {e}")
+        status_code = getattr(e, "status", None)
+        if status_code == 401:
+            logger.error("Нет авторизации для создания PR review. Проверьте GITHUB_TOKEN.")
+        elif status_code == 403:
+            logger.error(
+                "Нет прав на создание PR review. "
+                "Проверьте permissions workflow (pull-requests: write) "
+                "и права GITHUB_TOKEN в настройках организации/репозитория."
+            )
+        elif status_code == 404:
+            logger.error("PR или репозиторий не найден при создании PR review.")
+        elif status_code == 422:
+            logger.error("Невалидные данные при создании PR review (event=%s).", event)
+        elif status_code == 429:
+            logger.error("Слишком много запросов к GitHub API (rate limit).")
+        else:
+            logger.error("Ошибка при создании PR review (event=%s): %s", event, e)
+        return False
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при создании PR review: {e}", exc_info=True)
         return False
 
 
@@ -474,7 +503,26 @@ async def post_review_comment(github: Github, repo_name: str, pr_number: int, re
             return True
             
     except GithubException as e:
-        logger.error(f"Ошибка при публикации комментария: {e}")
+        status_code = getattr(e, "status", None)
+        if status_code == 401:
+            logger.error("Нет авторизации для публикации комментария. Проверьте GITHUB_TOKEN.")
+        elif status_code == 403:
+            logger.error(
+                "Нет прав на публикацию комментария. "
+                "Проверьте permissions workflow (pull-requests: write) "
+                "и права GITHUB_TOKEN в настройках организации/репозитория."
+            )
+        elif status_code == 404:
+            logger.error("PR или репозиторий не найден при публикации комментария.")
+        elif status_code == 422:
+            logger.error("Невалидные данные при публикации комментария.")
+        elif status_code == 429:
+            logger.error("Слишком много запросов к GitHub API (rate limit).")
+        else:
+            logger.error("Ошибка при публикации комментария: %s", e)
+        return False
+    except Exception as e:
+        logger.error(f"Неожиданная ошибка при публикации комментария: {e}", exc_info=True)
         return False
 
 
