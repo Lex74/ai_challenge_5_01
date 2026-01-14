@@ -10,6 +10,17 @@ class TestAnalyzeReviewForCriticalIssues(unittest.TestCase):
         self.assertFalse(result["has_issues"])
         self.assertEqual(result["critical_count"], 0)
 
+    def test_none_review_text(self):
+        result = analyze_review_for_critical_issues(None)
+        self.assertFalse(result["has_critical_issues"])
+        self.assertFalse(result["has_issues"])
+        self.assertEqual(result["critical_count"], 0)
+
+    def test_non_string_review_text(self):
+        result = analyze_review_for_critical_issues({"text": "критическая проблема"})
+        self.assertTrue(result["has_critical_issues"])
+        self.assertTrue(result["has_issues"])
+
     def test_detects_critical_section(self):
         review_text = (
             "## ⚠️ Критические проблемы\n"

@@ -24,6 +24,33 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+_REGEX_FLAGS = re.IGNORECASE | re.UNICODE
+
+# Компилируем паттерны один раз для производительности
+_CRITICAL_PATTERNS = [
+    ("critical_phrase", re.compile(r"\bкритическ\w*\s+проблем\w*\b", _REGEX_FLAGS)),
+    ("critical_word", re.compile(r"\bкритичн\w*\b", _REGEX_FLAGS)),
+    ("critical_emoji", re.compile(r"⚠️\s*критическ\w*", _REGEX_FLAGS)),
+    ("must_fix", re.compile(r"\bобязательно\s+исправить\b", _REGEX_FLAGS)),
+    ("requires_fix", re.compile(r"\bтребует\s+исправлен\w*\b", _REGEX_FLAGS)),
+    ("blocking", re.compile(r"\bблокир\w*\b", _REGEX_FLAGS)),
+    ("security_en", re.compile(r"\bsecurity\b", _REGEX_FLAGS)),
+    ("security_ru", re.compile(r"\bбезопасност\w*\b", _REGEX_FLAGS)),
+    ("vulnerability", re.compile(r"\bуязвимост\w*\b", _REGEX_FLAGS)),
+    ("bug", re.compile(r"\bbug\b", _REGEX_FLAGS)),
+    ("exception", re.compile(r"\bexception\b", _REGEX_FLAGS)),
+    ("crash", re.compile(r"\bcrash\b", _REGEX_FLAGS)),
+]
+
+_ISSUE_PATTERNS = [
+    re.compile(r"\bпроблем\w*\b", _REGEX_FLAGS),
+    re.compile(r"\bзамечан\w*\b", _REGEX_FLAGS),
+    re.compile(r"\bулучшен\w*\b", _REGEX_FLAGS),
+    re.compile(r"\bпредложен\w*\b", _REGEX_FLAGS),
+    re.compile(r"⚠️", _REGEX_FLAGS),
+    re.compile(r"❌", _REGEX_FLAGS),
+]
+
 
 async def get_pr_info(github: Github, repo_name: str, pr_number: int) -> Dict[str, Any]:
     """Получает информацию о PR через GitHub API"""
@@ -207,48 +234,22 @@ def analyze_review_for_critical_issues(review_text: str) -> Dict[str, Any]:
             "has_issues": False,
             "critical_count": 0
         }
+    if not isinstance(review_text, str):
+        review_text = str(review_text)
     if not review_text:
         return {
             "has_critical_issues": False,
             "has_issues": False,
             "critical_count": 0
         }
-
-    review_text = str(review_text)
     
     # Ищем индикаторы критических проблем (regex для точности и нормализации)
-    critical_patterns = [
-        r"\bкритическ\w*\s+проблем\w*\b",
-        r"\bкритичн\w*\b",
-        r"⚠️\s*критическ\w*",
-        r"\bобязательно\s+исправить\b",
-        r"\bтребует\s+исправлен\w*\b",
-        r"\bблокир\w*\b",
-        r"\bsecurity\b",
-        r"\bбезопасност\w*\b",
-        r"\bуязвимост\w*\b",
-        r"\bbug\b",
-        r"\bошибк\w*\b",
-        r"\bexception\b",
-        r"\bcrash\b"
-    ]
+    has_critical = any(pattern.search(review_text) for _, pattern in _CRITICAL_PATTERNS)
+    has_issues = any(pattern.search(review_text) for pattern in _ISSUE_PATTERNS)
     
-    # Ищем любые проблемы
-    issue_patterns = [
-        r"\bпроблем\w*\b",
-        r"\bзамечан\w*\b",
-        r"\bулучшен\w*\b",
-        r"\bпредложен\w*\b",
-        r"⚠️",
-        r"❌"
-    ]
-    
-    flags = re.IGNORECASE | re.UNICODE
-    has_critical = any(re.search(pattern, review_text, flags) for pattern in critical_patterns)
-    has_issues = any(re.search(pattern, review_text, flags) for pattern in issue_patterns)
-    
-    # Подсчитываем количество упоминаний критических проблем
-    critical_count = sum(1 for pattern in critical_patterns if re.search(pattern, review_text, flags))
+    # Подсчитываем количество уникальных категорий критических проблем
+    matched_categories = {name for name, pattern in _CRITICAL_PATTERNS if pattern.search(review_text)}
+    critical_count = len(matched_categories)
     
     # Проверяем наличие раздела "Критические проблемы"
     if "## ⚠️ критические проблемы" in review_text or "## ⚠️ Критические проблемы" in review_text:
@@ -270,6 +271,9 @@ def analyze_review_for_critical_issues(review_text: str) -> Dict[str, Any]:
             
             # Подсчитываем количество пунктов (маркеры списка)
             critical_count = critical_section.count("- ") + critical_section.count("* ")
+            if critical_count == 0:
+                # Если секция есть, но списков нет, считаем минимум 1 проблему
+                critical_count = 1
     
     return {
         "has_critical_issues": has_critical,
