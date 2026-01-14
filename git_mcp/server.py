@@ -112,6 +112,42 @@ async def list_tools() -> list[Tool]:
                 "required": []
             }
         ),
+        Tool(
+            name="get_pr_diff",
+            description="Получает diff между двумя коммитами или ветками (для PR)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "base": {
+                        "type": "string",
+                        "description": "Base коммит или ветка (например, main, master, или SHA коммита)"
+                    },
+                    "head": {
+                        "type": "string",
+                        "description": "Head коммит или ветка (например, feature-branch или SHA коммита)"
+                    }
+                },
+                "required": ["base", "head"]
+            }
+        ),
+        Tool(
+            name="get_pr_files",
+            description="Получает список измененных файлов между двумя коммитами или ветками (для PR)",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "base": {
+                        "type": "string",
+                        "description": "Base коммит или ветка (например, main, master, или SHA коммита)"
+                    },
+                    "head": {
+                        "type": "string",
+                        "description": "Head коммит или ветка (например, feature-branch или SHA коммита)"
+                    }
+                },
+                "required": ["base", "head"]
+            }
+        ),
     ]
 
 
@@ -295,6 +331,41 @@ async def call_tool(name: str, arguments: dict[str, Any] | None) -> Sequence[Tex
                 return [TextContent(type="text", text=f"Diff:\n\n{output}")]
             else:
                 return [TextContent(type="text", text="Нет изменений")]
+        else:
+            return [TextContent(type="text", text=f"Ошибка: {output}")]
+    
+    elif name == "get_pr_diff":
+        base = arguments.get("base")
+        head = arguments.get("head")
+        if not base or not head:
+            return [TextContent(type="text", text="Ошибка: не указаны base и head коммиты/ветки")]
+        
+        output, code = run_git_command(['diff', base, head])
+        if code == 0:
+            if output:
+                return [TextContent(type="text", text=f"Diff между {base} и {head}:\n\n{output}")]
+            else:
+                return [TextContent(type="text", text=f"Нет различий между {base} и {head}")]
+        else:
+            return [TextContent(type="text", text=f"Ошибка: {output}")]
+    
+    elif name == "get_pr_files":
+        base = arguments.get("base")
+        head = arguments.get("head")
+        if not base or not head:
+            return [TextContent(type="text", text="Ошибка: не указаны base и head коммиты/ветки")]
+        
+        output, code = run_git_command(['diff', '--name-only', base, head])
+        if code == 0:
+            if output:
+                files = output.split('\n')
+                files = [f for f in files if f]  # Убираем пустые строки
+                result_text = f"Измененные файлы между {base} и {head} ({len(files)} файлов):\n\n"
+                for f in files:
+                    result_text += f"  - {f}\n"
+                return [TextContent(type="text", text=result_text)]
+            else:
+                return [TextContent(type="text", text=f"Нет измененных файлов между {base} и {head}")]
         else:
             return [TextContent(type="text", text=f"Ошибка: {output}")]
     
