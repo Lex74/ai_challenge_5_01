@@ -85,9 +85,13 @@ MCP_GIT_ARGS = (
 # Формат: 2ceb45610e4e808984b8d8131d3ccc61 (без дефисов, как в URL)
 NOTION_NEWS_PAGE_ID = os.getenv('NOTION_NEWS_PAGE_ID', '2ceb45610e4e808984b8d8131d3ccc61')
 
+# GitHub API Configuration (для CI/CD ревью PR)
+GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
+GITHUB_REPOSITORY = os.getenv('GITHUB_REPOSITORY')  # Формат: owner/repo
+
 # Проверка наличия обязательных переменных
-if not TELEGRAM_BOT_TOKEN:
-    raise ValueError("TELEGRAM_BOT_TOKEN не установлен в переменных окружения")
+# TELEGRAM_BOT_TOKEN требуется только для бота, не для CI скриптов
+# Проверяем только если мы запускаем бота (проверка через наличие bot.py в импортах)
 if not OPENAI_API_KEY:
     raise ValueError("OPENAI_API_KEY не установлен в переменных окружения")
 

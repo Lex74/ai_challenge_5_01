@@ -18,5 +18,3 @@ __pycache__/
 # Sync script
 sync.sh
 ai-challenge.service
-
-document_index/
