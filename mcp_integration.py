@@ -66,7 +66,7 @@ def _convert_mcp_tool_to_openai_format(mcp_tool: Dict[str, Any], server_prefix: 
                 "посмотреть логи, проверить логи или любые запросы, связанные с логами telegram-бота. "
                 f"Этот инструмент получает последние логи из journalctl для сервиса telegram-bot.service. {description}"
             )
-    #review test
+ 
     # Улучшаем описание для Git инструментов
     if server_prefix == "git":
         if "branch" in name.lower() or "ветка" in description.lower() or "get_current_branch" in name.lower():
