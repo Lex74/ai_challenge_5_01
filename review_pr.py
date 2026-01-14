@@ -191,6 +191,154 @@ async def generate_review(
         raise
 
 
+def analyze_review_for_critical_issues(review_text: str) -> Dict[str, Any]:
+    """Анализирует ревью на наличие критических проблем
+    
+    Returns:
+        dict с ключами:
+        - has_critical_issues: bool - есть ли критические проблемы
+        - has_issues: bool - есть ли любые проблемы
+        - critical_count: int - количество критических проблем
+    """
+    review_lower = review_text.lower()
+    
+    # Ищем индикаторы критических проблем
+    critical_indicators = [
+        "критические проблемы",
+        "критическая проблема",
+        "⚠️ критические",
+        "критично",
+        "обязательно исправить",
+        "требует исправления",
+        "блокирует",
+        "security",
+        "безопасность",
+        "уязвимость",
+        "bug",
+        "ошибка",
+        "exception",
+        "crash"
+    ]
+    
+    # Ищем любые проблемы
+    issue_indicators = [
+        "проблем",
+        "замечани",
+        "улучшени",
+        "предложени",
+        "⚠️",
+        "❌"
+    ]
+    
+    has_critical = any(indicator in review_lower for indicator in critical_indicators)
+    has_issues = any(indicator in review_lower for indicator in issue_indicators)
+    
+    # Подсчитываем количество упоминаний критических проблем
+    critical_count = sum(1 for indicator in critical_indicators if indicator in review_lower)
+    
+    # Проверяем наличие раздела "Критические проблемы"
+    if "## ⚠️ критические проблемы" in review_text or "## ⚠️ Критические проблемы" in review_text:
+        has_critical = True
+        # Подсчитываем количество пунктов в разделе
+        critical_section = ""
+        if "## ⚠️ критические проблемы" in review_text:
+            start = review_text.find("## ⚠️ критические проблемы")
+        else:
+            start = review_text.find("## ⚠️ Критические проблемы")
+        
+        if start != -1:
+            # Берем текст до следующего раздела
+            next_section = review_text.find("\n## ", start + 1)
+            if next_section != -1:
+                critical_section = review_text[start:next_section]
+            else:
+                critical_section = review_text[start:]
+            
+            # Подсчитываем количество пунктов (маркеры списка)
+            critical_count = critical_section.count("- ") + critical_section.count("* ")
+    
+    return {
+        "has_critical_issues": has_critical,
+        "has_issues": has_issues,
+        "critical_count": critical_count
+    }
+
+
+async def create_status_check(
+    github: Github,
+    repo_name: str,
+    head_sha: str,
+    state: str,
+    description: str,
+    context: str = "pr-review/ai-reviewer"
+) -> bool:
+    """Создает статус проверки (status check) для коммита
+    
+    Args:
+        github: Экземпляр Github API
+        repo_name: Имя репозитория (owner/repo)
+        head_sha: SHA коммита
+        state: Состояние (success, failure, error, pending)
+        description: Описание статуса
+        context: Контекст статуса (по умолчанию "pr-review/ai-reviewer")
+    
+    Returns:
+        True если успешно, False в противном случае
+    """
+    try:
+        repo = github.get_repo(repo_name)
+        repo.get_commit(head_sha).create_status(
+            state=state,
+            target_url="",
+            description=description,
+            context=context
+        )
+        logger.info(f"Статус проверки создан: {state} - {description}")
+        return True
+    except GithubException as e:
+        logger.error(f"Ошибка при создании статуса проверки: {e}")
+        return False
+
+
+async def create_pr_review(
+    github: Github,
+    repo_name: str,
+    pr_number: int,
+    review_text: str,
+    event: str = "COMMENT"
+) -> bool:
+    """Создает PR review (approve/request changes/comment)
+    
+    Args:
+        github: Экземпляр Github API
+        repo_name: Имя репозитория (owner/repo)
+        pr_number: Номер PR
+        review_text: Текст ревью
+        event: Тип ревью (APPROVE, REQUEST_CHANGES, COMMENT)
+    
+    Returns:
+        True если успешно, False в противном случае
+    """
+    try:
+        repo = github.get_repo(repo_name)
+        pr = repo.get_pull(pr_number)
+        
+        # Ограничиваем длину ревью для PR review (65536 символов)
+        max_review_length = 60000
+        if len(review_text) > max_review_length:
+            review_text = review_text[:max_review_length] + "\n\n... (текст обрезан, полное ревью в комментариях)"
+        
+        pr.create_review(
+            body=review_text,
+            event=event
+        )
+        logger.info(f"PR review создан: {event}")
+        return True
+    except GithubException as e:
+        logger.error(f"Ошибка при создании PR review: {e}")
+        return False
+
+
 async def post_review_comment(github: Github, repo_name: str, pr_number: int, review_text: str) -> bool:
     """Публикует комментарий с ревью в PR"""
     try:
@@ -332,14 +480,57 @@ async def main():
         logger.info("Генерирую ревью...")
         review_text = await generate_review(pr_info, diff, rag_context)
         
-        # Публикуем комментарий в PR
-        logger.info("Публикую комментарий в PR...")
-        success = await post_review_comment(github, repo_name, args.pr_number, review_text)
+        # Анализируем ревью на наличие критических проблем
+        logger.info("Анализирую ревью на наличие критических проблем...")
+        analysis = analyze_review_for_critical_issues(review_text)
         
-        if success:
-            logger.info("✅ Ревью успешно завершено и опубликовано")
+        # Определяем статус проверки и тип ревью
+        if analysis["has_critical_issues"]:
+            status_state = "failure"
+            status_description = f"Найдено {analysis['critical_count']} критических проблем(ы)"
+            review_event = "REQUEST_CHANGES"
+            logger.warning(f"⚠️ Обнаружены критические проблемы: {analysis['critical_count']}")
+        elif analysis["has_issues"]:
+            status_state = "success"
+            status_description = "Ревью завершено, есть замечания"
+            review_event = "COMMENT"
+            logger.info("ℹ️ Обнаружены замечания, но нет критических проблем")
         else:
-            logger.error("❌ Не удалось опубликовать ревью")
+            status_state = "success"
+            status_description = "Ревью пройдено успешно"
+            review_event = "APPROVE"
+            logger.info("✅ Критических проблем не обнаружено")
+        
+        # Создаем статус проверки
+        logger.info(f"Создаю статус проверки: {status_state}")
+        await create_status_check(
+            github,
+            repo_name,
+            pr_info["head_sha"],
+            status_state,
+            status_description
+        )
+        
+        # Создаем PR review (approve/request changes/comment)
+        logger.info(f"Создаю PR review: {review_event}")
+        review_success = await create_pr_review(
+            github,
+            repo_name,
+            args.pr_number,
+            review_text,
+            review_event
+        )
+        
+        # Также публикуем комментарий для удобства просмотра
+        logger.info("Публикую комментарий в PR...")
+        comment_success = await post_review_comment(github, repo_name, args.pr_number, review_text)
+        
+        if review_success and comment_success:
+            logger.info("✅ Ревью успешно завершено и опубликовано")
+            if analysis["has_critical_issues"]:
+                logger.warning(f"⚠️ PR требует изменений из-за {analysis['critical_count']} критических проблем")
+        else:
+            logger.error("❌ Не удалось опубликовать ревью полностью")
             sys.exit(1)
             
     except Exception as e:
