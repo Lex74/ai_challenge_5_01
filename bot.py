@@ -46,7 +46,7 @@ async def post_init(application: Application) -> None:
     """Инициализация после создания приложения - загружаем MCP инструменты"""
     logger.info("Загружаю MCP инструменты при старте бота...")
     try:
-        mcp_tools = await get_all_mcp_tools()
+        mcp_tools = get_all_mcp_tools()
         application.bot_data['mcp_tools'] = mcp_tools
         logger.info(f"Успешно загружено {len(mcp_tools)} MCP инструментов при старте бота")
         
