@@ -9,6 +9,7 @@ from config import TELEGRAM_BOT_TOKEN
 from handlers.commands import (
     start,
     help_command,
+    support_command,
     setprompt_command,
     getprompt_command,
     resetprompt_command,
@@ -73,6 +74,7 @@ def main():
     # Регистрируем обработчики команд
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("support", support_command))
     application.add_handler(CommandHandler("setprompt", setprompt_command))
     application.add_handler(CommandHandler("getprompt", getprompt_command))
     application.add_handler(CommandHandler("resetprompt", resetprompt_command))
