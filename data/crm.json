@@ -1,0 +1,57 @@
+{
+  "users": [
+    {
+      "id": "u-1001",
+      "name": "Анна К.",
+      "email": "anna@example.com",
+      "plan": "pro",
+      "created_at": "2025-12-20T10:15:00Z"
+    },
+    {
+      "id": "u-1002",
+      "name": "Игорь П.",
+      "email": "igor@example.com",
+      "plan": "free",
+      "created_at": "2026-01-05T08:40:00Z"
+    }
+  ],
+  "tickets": [
+    {
+      "id": "t-501",
+      "user_id": "u-1001",
+      "subject": "Не работает авторизация",
+      "status": "open",
+      "priority": "high",
+      "tags": ["auth", "login", "web"],
+      "last_messages": [
+        {
+          "from": "user",
+          "text": "После ввода кода подтверждения получаю ошибку 401.",
+          "ts": "2026-01-14T18:12:00Z"
+        },
+        {
+          "from": "support",
+          "text": "Проверяем журналы и настройки OAuth. Уточните, входите через Google или email?",
+          "ts": "2026-01-14T18:30:00Z"
+        }
+      ],
+      "created_at": "2026-01-14T18:05:00Z"
+    },
+    {
+      "id": "t-502",
+      "user_id": "u-1002",
+      "subject": "Не приходит письмо с подтверждением",
+      "status": "pending",
+      "priority": "medium",
+      "tags": ["email", "onboarding"],
+      "last_messages": [
+        {
+          "from": "user",
+          "text": "Письмо не приходит уже 20 минут.",
+          "ts": "2026-01-15T09:20:00Z"
+        }
+      ],
+      "created_at": "2026-01-15T09:19:00Z"
+    }
+  ]
+}

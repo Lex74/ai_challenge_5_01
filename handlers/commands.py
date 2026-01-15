@@ -1,6 +1,7 @@
 """Обработчики команд бота"""
 import logging
 import json
+from datetime import datetime
 from typing import Optional, Tuple, List, Dict, Any
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
@@ -16,6 +17,81 @@ from memory import clear_memory
 from utils import format_tools_list, split_long_message
 
 logger = logging.getLogger(__name__)
+
+def _parse_iso_datetime(value: str) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _score_ticket_match(ticket: Dict[str, Any], question: str) -> int:
+    subject = (ticket.get("subject") or "").lower()
+    tags = " ".join(ticket.get("tags") or []).lower()
+    messages = " ".join(
+        msg.get("text", "") for msg in (ticket.get("last_messages") or [])
+    ).lower()
+    haystack = " ".join([subject, tags, messages])
+
+    words = [w for w in question.lower().split() if len(w) > 3]
+    score = 0
+    for word in words:
+        if word in subject:
+            score += 3
+        if word in tags:
+            score += 2
+        if word in messages:
+            score += 1
+    return score
+
+
+def _select_ticket_for_question(tickets: List[Dict[str, Any]], question: str) -> Optional[Dict[str, Any]]:
+    if not tickets:
+        return None
+
+    scored = []
+    for ticket in tickets:
+        score = _score_ticket_match(ticket, question)
+        scored.append((score, ticket))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    best_score, best_ticket = scored[0]
+    if best_score > 0:
+        return best_ticket
+    return None
+
+
+def _format_ticket_context(ticket: Dict[str, Any], user: Optional[Dict[str, Any]]) -> str:
+    """Формирует краткий контекст тикета для поддержки."""
+    lines = [
+        f"ID тикета: {ticket.get('id', '—')}",
+        f"Тема: {ticket.get('subject', '—')}",
+        f"Статус: {ticket.get('status', '—')}",
+        f"Приоритет: {ticket.get('priority', '—')}",
+    ]
+
+    tags = ticket.get("tags") or []
+    if tags:
+        lines.append(f"Теги: {', '.join(tags)}")
+
+    if user:
+        lines.append(
+            f"Пользователь: {user.get('name', '—')} "
+            f"({user.get('email', '—')}, тариф: {user.get('plan', '—')})"
+        )
+
+    last_messages = ticket.get("last_messages") or []
+    if last_messages:
+        lines.append("Последняя переписка:")
+        for msg in last_messages[-5:]:
+            sender = msg.get("from", "unknown")
+            text = msg.get("text", "")
+            ts = msg.get("ts", "")
+            lines.append(f"- [{ts}] {sender}: {text}")
+
+    return "\n".join(lines)
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -141,11 +217,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(part, parse_mode='HTML')
         
         # Отправляем источники, если есть
-        if sources:
-            sources_text = format_sources_for_display(sources)
-            if sources_text:
-                sources_formatted = convert_markdown_to_telegram(sources_text)
-                await update.message.reply_text(sources_formatted, parse_mode='HTML')
+        # Для поддержки не показываем RAG-источники по умолчанию,
+        # чтобы не отвлекать от контекста тикета.
         
         # Обновляем историю диалога
         conversation_history.append({"role": "user", "content": question})
@@ -185,6 +258,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/setmaxtokens - установить максимальное количество токенов (например: 2000)\n"
             "/getmaxtokens - показать текущее максимальное количество токенов\n"
             "/resetmaxtokens - сбросить к дефолтному значению (1000)\n\n"
+            "/support <ticket_id> <вопрос> - ответ поддержки с контекстом тикета\n"
+            "/support <вопрос> - ответ поддержки с автоподбором тикета\n\n"
             "/notion_tools - показать список доступных инструментов Notion\n"
             "/kinopoisk_tools - показать список доступных инструментов Kinopoisk MCP\n"
             "/news_tools - показать список доступных инструментов News MCP\n\n"
@@ -200,6 +275,126 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/help какие файлы изменены?\n"
             "/help покажи содержимое файла bot.py\n"
             "/help объясни структуру проекта"
+        )
+
+
+async def support_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик команды /support для поддержки пользователей с контекстом тикета."""
+    if not context.args:
+        await update.message.reply_text(
+            "Использование:\n"
+            "/support <ticket_id> <вопрос>\n"
+            "/support <вопрос>\n\n"
+            "Пример:\n"
+            "/support t-501 Почему не работает авторизация?\n"
+            "/support Почему не работает авторизация?"
+        )
+        return
+
+    first_arg = context.args[0].strip()
+    has_ticket_id = first_arg.lower().startswith("t-")
+    ticket_id = first_arg if has_ticket_id else ""
+    question = " ".join(context.args[1:]).strip() if has_ticket_id else " ".join(context.args).strip()
+    if not question:
+        await update.message.reply_text(
+            "❌ Укажите вопрос.\n"
+            "Пример: /support Почему не работает авторизация?"
+        )
+        return
+
+    from mcp_crm_client import (
+        get_ticket_by_id,
+        get_user_by_id,
+        get_crm_last_error,
+        load_crm_data,
+    )
+    from rag import query_with_rag, format_sources_for_display
+    from utils import convert_markdown_to_telegram
+
+    if ticket_id:
+        ticket = get_ticket_by_id(ticket_id)
+    else:
+        data = load_crm_data()
+        tickets = data.get("tickets", []) if data else []
+        ticket = _select_ticket_for_question(tickets, question) if tickets else None
+
+    if not ticket:
+        error_info = get_crm_last_error()
+        if error_info:
+            _, error_msg = error_info
+            await update.message.reply_text(f"❌ Ошибка CRM: {error_msg}")
+            return
+
+    user = None
+    ticket_context = ""
+    if ticket:
+        user_id = ticket.get("user_id")
+        if user_id:
+            user = get_user_by_id(user_id)
+        ticket_context = _format_ticket_context(ticket, user)
+        if not ticket_id:
+            await update.message.reply_text(
+                f"ℹ️ Нашел подходящий тикет: {ticket.get('id', '—')} — {ticket.get('subject', '—')}"
+            )
+
+    support_system_prompt = (
+        "Ты ассистент поддержки пользователей продукта. "
+        "Отвечай на русском языке, кратко и по делу. "
+        "Сначала используй контекст тикета (если он есть), затем документацию проекта, "
+        "НО только если она напрямую относится к проблеме пользователя. "
+        "Игнорируй документацию про CI/GitHub/Notion, если вопрос о работе продукта. "
+        "Если данных недостаточно, задай уточняющие вопросы. "
+        "Если нужно, предложи шаги диагностики."
+    )
+    if ticket_context:
+        support_system_prompt += "\n\nКонтекст тикета:\n" + ticket_context
+
+    # Получаем настройки модели из user_data или используем дефолтные
+    temperature = context.user_data.get('temperature', DEFAULT_TEMPERATURE)
+    model = context.user_data.get('model', DEFAULT_MODEL)
+    max_tokens = context.user_data.get('max_tokens', MAX_TOKENS)
+
+    # Получаем настройки RAG
+    relevance_threshold = context.user_data.get('rag_relevance_threshold')
+    rerank_method = context.user_data.get('rag_rerank_method')
+    if relevance_threshold is None:
+        relevance_threshold = 0.3
+    if not rerank_method:
+        rerank_method = "diversity"
+
+    # MCP инструменты (включая CRM)
+    mcp_tools = context.bot_data.get('mcp_tools', [])
+
+    thinking_message = await update.message.reply_text("🤔 Думаю над ответом...")
+    try:
+        answer, _, sources = await query_with_rag(
+            question,
+            [],
+            support_system_prompt,
+            temperature,
+            model,
+            max_tokens,
+            context.bot,
+            tools=mcp_tools if mcp_tools else None,
+            relevance_threshold=relevance_threshold,
+            rerank_method=rerank_method,
+            use_filter=(relevance_threshold is not None),
+        )
+
+        await thinking_message.delete()
+
+        formatted_answer = convert_markdown_to_telegram(answer)
+        message_parts = split_long_message(formatted_answer, max_length=4000)
+        for part in message_parts:
+            await update.message.reply_text(part, parse_mode='HTML')
+
+        # Для поддержки не показываем RAG-источники по умолчанию,
+        # чтобы не отвлекать от контекста тикета.
+    except Exception as e:
+        logger.error(f"Ошибка при обработке /support: {e}", exc_info=True)
+        await thinking_message.delete()
+        await update.message.reply_text(
+            "❌ Произошла ошибка при обработке запроса поддержки. Попробуйте позже."
         )
 
 

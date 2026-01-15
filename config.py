@@ -80,6 +80,12 @@ MCP_GIT_ARGS = (
     else [_git_mcp_server]
 )
 
+# Локальный CRM JSON (мини-CRM для поддержки)
+CRM_DATA_PATH = os.getenv(
+    'CRM_DATA_PATH',
+    os.path.abspath(os.path.join(_config_dir, 'data', 'crm.json'))
+)
+
 # Notion страница для сохранения новостей
 # Page ID извлекается из URL: https://www.notion.so/2ceb45610e4e808984b8d8131d3ccc61
 # Формат: 2ceb45610e4e808984b8d8131d3ccc61 (без дефисов, как в URL)

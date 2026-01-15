@@ -3,6 +3,7 @@ import logging
 from typing import List, Dict, Any, Optional
 
 from mcp_client import list_notion_tools, call_notion_tool
+from mcp_crm_client import list_crm_tools, call_crm_tool
 from mcp_kinopoisk_client import list_kinopoisk_tools, call_kinopoisk_tool
 from mcp_news_client import list_news_tools, call_news_tool
 from mcp_logs_client import list_logs_tools, call_logs_tool
@@ -67,6 +68,19 @@ def _convert_mcp_tool_to_openai_format(mcp_tool: Dict[str, Any], server_prefix: 
                 f"Этот инструмент получает последние логи из journalctl для сервиса telegram-bot.service. {description}"
             )
     
+    # Улучшаем описание для CRM инструментов
+    if server_prefix == "crm":
+        if "ticket" in name.lower() or "тикет" in description.lower():
+            description = (
+                "Используй этот инструмент, когда нужен контекст тикета поддержки: статус, приоритет, теги, переписка. "
+                f"{description}"
+            )
+        elif "user" in name.lower() or "пользователь" in description.lower():
+            description = (
+                "Используй этот инструмент для получения профиля пользователя из CRM. "
+                f"{description}"
+            )
+
     # Улучшаем описание для Git инструментов
     if server_prefix == "git":
         if "branch" in name.lower() or "ветка" in description.lower() or "get_current_branch" in name.lower():
@@ -269,6 +283,22 @@ async def get_all_mcp_tools() -> List[Dict[str, Any]]:
             logger.warning("Список инструментов Git MCP пуст. Проверьте путь к серверу.")
     except Exception as e:
         logger.error(f"Не удалось получить инструменты Git MCP: {e}", exc_info=True)
+
+    # Получаем инструменты CRM
+    try:
+        crm_tools = await list_crm_tools()
+        logger.info(f"Получено {len(crm_tools)} инструментов CRM")
+        if crm_tools:
+            for tool in crm_tools:
+                tool_name = tool.get('name', 'unknown')
+                logger.info(f"Обрабатываю CRM инструмент: {tool_name}")
+                openai_tool = _convert_mcp_tool_to_openai_format(tool, "crm")
+                openai_tools.append(openai_tool)
+                logger.info(f"CRM инструмент {tool_name} преобразован в OpenAI формат как crm_{tool_name}")
+        else:
+            logger.warning("Список инструментов CRM пуст. Проверьте CRM_DATA_PATH.")
+    except Exception as e:
+        logger.error(f"Не удалось получить инструменты CRM: {e}", exc_info=True)
     
     # Кэшируем результат
     _cached_tools = openai_tools
@@ -326,8 +356,16 @@ async def call_mcp_tool(tool_name: str, arguments: Dict[str, Any]) -> Optional[s
             result = await call_git_tool(actual_tool_name, arguments)
             logger.info(f"Git MCP инструмент {actual_tool_name} вернул результат (длина: {len(str(result)) if result else 0})")
             return result
+        elif server_prefix == "crm":
+            logger.info(f"Вызываю CRM инструмент: {actual_tool_name}")
+            result = await call_crm_tool(actual_tool_name, arguments)
+            logger.info(f"CRM инструмент {actual_tool_name} вернул результат (длина: {len(str(result)) if result else 0})")
+            return result
         else:
-            logger.error(f"Неизвестный префикс сервера: {server_prefix}. Ожидается 'notion', 'kinopoisk', 'news', 'logs' или 'git'")
+            logger.error(
+                f"Неизвестный префикс сервера: {server_prefix}. "
+                "Ожидается 'notion', 'kinopoisk', 'news', 'logs', 'git' или 'crm'"
+            )
             return None
     except Exception as e:
         logger.error(f"Ошибка при вызове MCP инструмента {tool_name}: {e}", exc_info=True)
