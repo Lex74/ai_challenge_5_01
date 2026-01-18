@@ -151,6 +151,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Собираем информацию о Git инструментах
         git_tools_info = []
         git_tools_available = False
+        notion_tools_info = []
+        notion_tools_available = False
         if mcp_tools:
             for tool in mcp_tools:
                 tool_func = tool.get('function', {})
@@ -159,6 +161,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if tool_name.startswith('git_'):
                     git_tools_info.append(f"- {tool_name}: {tool_desc}")
                     git_tools_available = True
+                elif tool_name.startswith('notion_'):
+                    notion_tools_info.append(f"- {tool_name}: {tool_desc}")
+                    notion_tools_available = True
+        
+        # Проверяем, является ли запрос запросом о задачах
+        question_lower = question.lower()
+        task_keywords = ['задача', 'задачи', 'task', 'tasks', 'приоритет', 'priority', 
+                        'создай задачу', 'create task', 'покажи задачи', 'show tasks',
+                        'рекомендации', 'recommendations', 'что делать', 'что делать первым']
+        is_task_query = any(keyword in question_lower for keyword in task_keywords)
         
         # Специальный системный промпт для ассистента разработчика
         system_prompt = (
@@ -167,31 +179,222 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "1. Документации проекта через RAG (README, API, схемы данных)\n"
         )
         
+        access_list = []
+        if git_tools_available:
+            access_list.append("2. Git репозиторию через MCP инструменты (ветки, файлы, статус, diff, коммиты)")
+            access_list.append("3. Коду проекта через чтение файлов")
+        else:
+            access_list.append("2. Коду проекта через чтение файлов")
+        
+        if notion_tools_available:
+            access_list.append(f"{len(access_list) + 1}. Notion через MCP инструменты (создание и управление задачами)")
+        
+        system_prompt += "\n".join(access_list) + "\n\n"
+        
+        # Добавляем правила использования инструментов
+        system_prompt += "КРИТИЧЕСКИ ВАЖНО - ПРАВИЛА ИСПОЛЬЗОВАНИЯ ИНСТРУМЕНТОВ:\n\n"
+        system_prompt += "КОГДА ПОЛЬЗОВАТЕЛЬ СПРАШИВАЕТ О:\n"
+        
         if git_tools_available:
             system_prompt += (
-                "2. Git репозиторию через MCP инструменты (ветки, файлы, статус, diff, коммиты)\n"
-                "3. Коду проекта через чтение файлов\n\n"
-                "КРИТИЧЕСКИ ВАЖНО - ПРАВИЛА ИСПОЛЬЗОВАНИЯ ИНСТРУМЕНТОВ:\n\n"
-                "КОГДА ПОЛЬЗОВАТЕЛЬ СПРАШИВАЕТ О:\n"
                 "- Git репозитории (ветка, текущая ветка, активная ветка, статус, файлы, коммиты, diff) - "
                 "ОБЯЗАТЕЛЬНО используй git инструменты СРАЗУ, БЕЗ использования RAG!\n"
                 "- Содержимом файлов из репозитория - используй git инструменты для получения содержимого\n"
-                "- Документации проекта (как работает что-то, API, структура) - используй информацию из RAG\n"
-                "- Структуре проекта - используй RAG и git инструменты\n\n"
-                "Доступные Git инструменты:\n" + "\n".join(git_tools_info) + "\n\n"
+            )
+        
+        system_prompt += (
+            "- Документации проекта (как работает что-то, API, структура) - используй информацию из RAG\n"
+            "- Структуре проекта - используй RAG и git инструменты\n"
+        )
+        
+        if notion_tools_available:
+            system_prompt += (
+                "- Задачах (создание задачи, показ задач, рекомендации по приоритетам) - "
+                "ОБЯЗАТЕЛЬНО используй Notion инструменты для работы с задачами!\n"
+                "- При создании задачи используй notion-create-pages с указанием parent (database_id)\n"
+                "- При поиске задач используй notion-search или notion-query-database\n"
+            )
+        
+        system_prompt += "\n"
+        
+        if git_tools_available:
+            system_prompt += "Доступные Git инструменты:\n" + "\n".join(git_tools_info) + "\n\n"
+            system_prompt += (
                 "ВАЖНО: Если вопрос касается git (ветка, статус, файлы, коммиты), "
                 "НЕ ищи информацию в документации через RAG - используй git инструменты напрямую!\n"
                 "Например, если пользователь спрашивает 'какая сейчас активная ветка', "
                 "используй git_get_current_branch, а НЕ ищи в документации.\n\n"
             )
-        else:
+        
+        if notion_tools_available:
+            system_prompt += "Доступные Notion инструменты:\n" + "\n".join(notion_tools_info) + "\n\n"
             system_prompt += (
-                "2. Коду проекта через чтение файлов\n\n"
+                "ВАЖНО: Если вопрос касается задач (создание, показ, рекомендации), "
+                "используй Notion инструменты для работы с базой данных задач. "
+                "Для создания задачи используй notion-create-pages с parent: {'database_id': 'ID_базы_данных'}.\n\n"
             )
         
         system_prompt += (
             "Будь конкретным, показывай примеры кода, ссылайся на файлы. Отвечай на русском языке."
         )
+        
+        # Если это запрос о задачах, добавляем специальную обработку
+        if is_task_query and notion_tools_available:
+            from task_manager import (
+                create_task_in_notion,
+                get_tasks_by_priority,
+                recommend_task_priority
+            )
+            
+            # Распознаем тип запроса о задачах
+            if any(kw in question_lower for kw in ['создай задачу', 'create task', 'создать задачу']):
+                # Извлекаем информацию о задаче из запроса
+                # Используем LLM для парсинга запроса
+                parse_prompt = (
+                    f"Пользователь хочет создать задачу: {question}\n\n"
+                    "Извлеки из запроса:\n"
+                    "1. Название задачи (title)\n"
+                    "2. Описание задачи (description, если есть)\n"
+                    "3. Приоритет (priority: low, medium, high)\n\n"
+                    "Ответь в формате JSON:\n"
+                    '{"title": "название", "description": "описание", "priority": "medium"}'
+                )
+                
+                from openai_client import query_openai
+                parse_result, _ = await query_openai(
+                    parse_prompt,
+                    [],
+                    "Ты помощник, который извлекает информацию из запросов пользователя. Отвечай только JSON.",
+                    0.3,
+                    DEFAULT_MODEL,
+                    500,
+                    context.bot,
+                    None
+                )
+                
+                try:
+                    import json
+                    # Пытаемся извлечь JSON из ответа
+                    json_start = parse_result.find('{')
+                    json_end = parse_result.rfind('}') + 1
+                    if json_start >= 0 and json_end > json_start:
+                        task_data = json.loads(parse_result[json_start:json_end])
+                        title = task_data.get('title', '')
+                        description = task_data.get('description', '')
+                        priority = task_data.get('priority', 'medium')
+                        
+                        if title:
+                            # Получаем Notion инструменты для LLM
+                            notion_tools_for_llm = [t for t in mcp_tools if t.get('function', {}).get('name', '').startswith('notion_')]
+                            # Получаем модель из контекста
+                            current_model = context.user_data.get('model', DEFAULT_MODEL)
+                            current_temp = context.user_data.get('temperature', DEFAULT_TEMPERATURE)
+                            task_id = await create_task_in_notion(
+                                title, 
+                                description, 
+                                priority,
+                                notion_tools=notion_tools_for_llm if notion_tools_for_llm else None,
+                                model=current_model,
+                                temperature=current_temp
+                            )
+                            if task_id:
+                                answer = (
+                                    f"✅ Задача создана успешно!\n\n"
+                                    f"📋 Название: {title}\n"
+                                    f"📝 Описание: {description if description else 'не указано'}\n"
+                                    f"⚡ Приоритет: {priority}\n"
+                                    f"🔗 ID задачи: {task_id}"
+                                )
+                            else:
+                                answer = "❌ Не удалось создать задачу. Проверьте настройки Notion и наличие базы данных задач."
+                        else:
+                            answer = "❌ Не удалось извлечь название задачи из запроса. Попробуйте: /help создай задачу \"Название задачи\" с приоритетом high"
+                    else:
+                        answer = "❌ Не удалось распарсить информацию о задаче. Попробуйте: /help создай задачу \"Название задачи\" с приоритетом high"
+                except (json.JSONDecodeError, KeyError) as e:
+                    logger.error(f"Ошибка при парсинге информации о задаче: {e}")
+                    answer = "❌ Ошибка при обработке запроса на создание задачи. Попробуйте еще раз."
+                
+                # Отправляем ответ
+                formatted_answer = convert_markdown_to_telegram(answer)
+                await update.message.reply_text(formatted_answer, parse_mode='HTML')
+                
+                # Сохраняем в историю
+                conversation_history.append({"role": "user", "content": question})
+                conversation_history.append({"role": "assistant", "content": answer})
+                memory_data = {
+                    "summary": memory_data.get("summary", ""),
+                    "recent_messages": conversation_history[-10:],
+                    "message_count": memory_data.get("message_count", 0)
+                }
+                from memory import save_memory_to_disk
+                save_memory_to_disk(user_id, memory_data)
+                return
+            
+            elif any(kw in question_lower for kw in ['покажи задачи', 'show tasks', 'задачи с приоритетом']):
+                # Извлекаем приоритет из запроса
+                priority = "high"  # по умолчанию
+                if 'low' in question_lower or 'низкий' in question_lower:
+                    priority = "low"
+                elif 'medium' in question_lower or 'средний' in question_lower:
+                    priority = "medium"
+                elif 'high' in question_lower or 'высокий' in question_lower:
+                    priority = "high"
+                
+                # Получаем задачи
+                tasks = await get_tasks_by_priority(priority)
+                
+                if not tasks:
+                    answer = f"📋 Задач с приоритетом {priority} не найдено."
+                else:
+                    # Форматируем список задач
+                    tasks_list = []
+                    for i, task in enumerate(tasks, 1):
+                        task_line = f"{i}. **{task.get('title', 'Без названия')}**"
+                        if task.get('status'):
+                            task_line += f" (статус: {task.get('status')})"
+                        if task.get('description'):
+                            task_line += f"\n   {task.get('description')[:100]}..."
+                        tasks_list.append(task_line)
+                    
+                    answer = f"📋 Задачи с приоритетом **{priority}** ({len(tasks)} шт.):\n\n" + "\n\n".join(tasks_list)
+                    
+                    # Если запрос содержит "предложи" или "рекомендации", добавляем рекомендации
+                    if any(kw in question_lower for kw in ['предложи', 'рекомендации', 'что делать', 'что делать первым']):
+                        # Получаем контекст проекта через RAG
+                        project_context = ""
+                        try:
+                            from rag import format_chunks_for_context
+                            from document_indexer import load_index, search_index
+                            index = load_index()
+                            if index:
+                                search_results = search_index("текущий статус проекта", index, top_k=3)
+                                if search_results:
+                                    project_context = format_chunks_for_context(search_results)
+                        except Exception as e:
+                            logger.warning(f"Не удалось получить контекст проекта: {e}")
+                        
+                        # Генерируем рекомендации
+                        recommendations = await recommend_task_priority(tasks, project_context, DEFAULT_MODEL, DEFAULT_TEMPERATURE)
+                        answer += f"\n\n💡 **Рекомендации:**\n\n{recommendations}"
+                
+                # Отправляем ответ
+                formatted_answer = convert_markdown_to_telegram(answer)
+                message_parts = split_long_message(formatted_answer, max_length=4000)
+                for part in message_parts:
+                    await update.message.reply_text(part, parse_mode='HTML')
+                
+                # Сохраняем в историю
+                conversation_history.append({"role": "user", "content": question})
+                conversation_history.append({"role": "assistant", "content": answer})
+                memory_data = {
+                    "summary": memory_data.get("summary", ""),
+                    "recent_messages": conversation_history[-10:],
+                    "message_count": memory_data.get("message_count", 0)
+                }
+                from memory import save_memory_to_disk
+                save_memory_to_disk(user_id, memory_data)
+                return
         
         # Используем RAG для поиска в документации проекта
         answer, updated_history, sources = await query_with_rag(
@@ -274,7 +477,12 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "/help покажи текущую ветку git\n"
             "/help какие файлы изменены?\n"
             "/help покажи содержимое файла bot.py\n"
-            "/help объясни структуру проекта"
+            "/help объясни структуру проекта\n\n"
+            "📋 Примеры работы с задачами (требует настройки Notion):\n"
+            "/help создай задачу \"Рефакторинг модуля RAG\" с приоритетом high\n"
+            "/help покажи задачи с приоритетом high\n"
+            "/help покажи задачи с приоритетом high и предложи, что делать первым\n"
+            "/help какой текущий статус проекта?"
         )
 
 

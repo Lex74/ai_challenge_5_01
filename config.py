@@ -91,6 +91,17 @@ CRM_DATA_PATH = os.getenv(
 # Формат: 2ceb45610e4e808984b8d8131d3ccc61 (без дефисов, как в URL)
 NOTION_NEWS_PAGE_ID = os.getenv('NOTION_NEWS_PAGE_ID', '2ceb45610e4e808984b8d8131d3ccc61')
 
+# Notion база данных/страница для задач команды
+# ID извлекается из URL базы данных или страницы в Notion
+# Формат: xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx (32 символа, без дефисов)
+# Задачи создаются как дочерние страницы этой страницы/базы данных
+# Структура базы данных (если это база данных):
+# - Название (Title) - название задачи
+# - Описание (Text) - описание задачи
+# - Приоритет (Select) - low, medium, high
+# - Статус (Select) - todo, in_progress, done (опционально)
+NOTION_TASKS_DATABASE_ID = os.getenv('NOTION_TASKS_DATABASE_ID', '2eab45610e4e80e7b1e6c495c02d9d38')
+
 # GitHub API Configuration (для CI/CD ревью PR)
 GITHUB_TOKEN = os.getenv('GITHUB_TOKEN')
 GITHUB_REPOSITORY = os.getenv('GITHUB_REPOSITORY')  # Формат: owner/repo
