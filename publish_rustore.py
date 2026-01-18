@@ -63,7 +63,18 @@ def get_jwe_token(private_key: rsa.RSAPrivateKey) -> Optional[str]:
     - Используется POST /public/auth/ для получения токена
     - Токен действителен 900 секунд (15 минут)
     - Токен передается в заголовке Authorization: API-key {token}
+    
+    Args:
+        private_key: Приватный RSA ключ для подписи JWT токена
+        
+    Returns:
+        JWE-токен или None в случае ошибки
     """
+    # Проверка наличия приватного ключа
+    if private_key is None:
+        logger.error("❌ Приватный ключ не передан (None)")
+        return None
+    
     try:
         logger.info("🔐 Получаю JWE-токен через RuStore API...")
         
@@ -169,7 +180,24 @@ def get_jwe_token(private_key: rsa.RSAPrivateKey) -> Optional[str]:
 
 
 def create_version_draft(auth_token: str, package_name: str) -> Optional[str]:
-    """Создает черновик версии в RuStore и возвращает versionId"""
+    """Создает черновик версии в RuStore и возвращает versionId
+    
+    Args:
+        auth_token: JWE-токен для авторизации
+        package_name: Package name приложения
+        
+    Returns:
+        versionId созданной версии или None в случае ошибки
+    """
+    # Проверка входных параметров
+    if not auth_token or not auth_token.strip():
+        logger.error("❌ Токен авторизации не указан или пустой")
+        return None
+    
+    if not package_name or not package_name.strip():
+        logger.error("❌ Package name не указан или пустой")
+        return None
+    
     try:
         logger.info(f"📝 Создаю черновик версии для приложения {package_name}...")
         
@@ -237,13 +265,49 @@ def create_version_draft(auth_token: str, package_name: str) -> Optional[str]:
 
 
 def upload_apk(auth_token: str, package_name: str, version_id: str, apk_path: str) -> bool:
-    """Загружает APK файл в RuStore"""
-    try:
-        logger.info(f"📤 Загружаю APK файл: {apk_path}...")
+    """Загружает APK файл в RuStore
+    
+    Args:
+        auth_token: JWE-токен для авторизации
+        package_name: Package name приложения
+        version_id: ID версии для загрузки APK
+        apk_path: Путь к APK файлу
         
-        if not os.path.exists(apk_path):
-            logger.error(f"❌ APK файл не найден: {apk_path}")
+    Returns:
+        True если загрузка успешна, False в противном случае
+    """
+    # Проверка наличия файла перед загрузкой
+    if not apk_path or not apk_path.strip():
+        logger.error("❌ Путь к APK файлу не указан")
+        return False
+    
+    if not os.path.exists(apk_path):
+        logger.error(f"❌ APK файл не найден: {apk_path}")
+        logger.error(f"💡 Текущая рабочая директория: {os.getcwd()}")
+        return False
+    
+    if not os.path.isfile(apk_path):
+        logger.error(f"❌ Указанный путь не является файлом: {apk_path}")
+        return False
+    
+    # Проверка размера файла
+    try:
+        apk_size = os.path.getsize(apk_path)
+        if apk_size == 0:
+            logger.error(f"❌ APK файл пустой: {apk_path}")
             return False
+        # Максимальный размер APK в RuStore: 5GB
+        max_size = 5 * 1024 * 1024 * 1024  # 5GB в байтах
+        if apk_size > max_size:
+            logger.error(f"❌ APK файл слишком большой: {apk_size / 1024 / 1024 / 1024:.2f} GB")
+            logger.error(f"💡 Максимальный размер: 5 GB")
+            return False
+    except OSError as e:
+        logger.error(f"❌ Ошибка при проверке размера файла: {e}")
+        return False
+    
+    try:
+        logger.info(f"📤 Загружаю APK файл: {apk_path} ({os.path.getsize(apk_path) / 1024 / 1024:.2f} MB)...")
         
         url = f"{RUSTORE_API_BASE}/application/{package_name}/version/{version_id}/apk"
         params = {
@@ -312,7 +376,29 @@ def upload_apk(auth_token: str, package_name: str, version_id: str, apk_path: st
 
 
 def submit_for_moderation(auth_token: str, package_name: str, version_id: str) -> bool:
-    """Отправляет версию на модерацию"""
+    """Отправляет версию на модерацию
+    
+    Args:
+        auth_token: JWE-токен для авторизации
+        package_name: Package name приложения
+        version_id: ID версии для отправки на модерацию
+        
+    Returns:
+        True если отправка успешна, False в противном случае
+    """
+    # Проверка входных параметров
+    if not auth_token or not auth_token.strip():
+        logger.error("❌ Токен авторизации не указан или пустой")
+        return False
+    
+    if not package_name or not package_name.strip():
+        logger.error("❌ Package name не указан или пустой")
+        return False
+    
+    if not version_id or not version_id.strip():
+        logger.error("❌ Version ID не указан или пустой")
+        return False
+    
     try:
         logger.info(f"🚀 Отправляю версию {version_id} на модерацию...")
         
@@ -365,7 +451,29 @@ def submit_for_moderation(auth_token: str, package_name: str, version_id: str) -
 
 
 def publish_apk_to_rustore(apk_path: str, private_key_str: str, package_name: str) -> bool:
-    """Основная функция для публикации APK в RuStore"""
+    """Основная функция для публикации APK в RuStore
+    
+    Args:
+        apk_path: Путь к APK файлу
+        private_key_str: Приватный RSA ключ в формате строки
+        package_name: Package name приложения
+        
+    Returns:
+        True если публикация успешна, False в противном случае
+    """
+    # Проверка обязательных параметров
+    if not private_key_str or not private_key_str.strip():
+        logger.error("❌ Приватный ключ не указан или пустой")
+        return False
+    
+    if not package_name or not package_name.strip():
+        logger.error("❌ Package name не указан или пустой")
+        return False
+    
+    if not apk_path or not apk_path.strip():
+        logger.error("❌ Путь к APK файлу не указан или пустой")
+        return False
+    
     try:
         logger.info("=" * 60)
         logger.info("🚀 Начинаю публикацию APK в RuStore")

@@ -33,14 +33,31 @@ jobs:
       - name: Verify APK file exists
         id: check_apk
         run: |
-          if [ ! -f "release/app-release.apk" ]; then
-            echo "❌ APK file not found: release/app-release.apk"
+          APK_FILE="release/app-release.apk"
+          if [ ! -f "$APK_FILE" ]; then
+            echo "❌ APK file not found: $APK_FILE"
             exit 1
-          else
-            echo "✅ APK file found: release/app-release.apk"
-            APK_SIZE=$(stat -f%z "release/app-release.apk" 2>/dev/null || stat -c%s "release/app-release.apk" 2>/dev/null || echo "0")
-            echo "APK size: ${APK_SIZE} bytes"
           fi
+          
+          # Проверяем размер файла
+          APK_SIZE=$(stat -f%z "$APK_FILE" 2>/dev/null || stat -c%s "$APK_FILE" 2>/dev/null || echo "0")
+          if [ "$APK_SIZE" -eq 0 ]; then
+            echo "❌ APK file is empty: $APK_FILE"
+            exit 1
+          fi
+          
+          # Максимальный размер APK в RuStore: 5GB
+          MAX_SIZE=$((5 * 1024 * 1024 * 1024))
+          if [ "$APK_SIZE" -gt "$MAX_SIZE" ]; then
+            echo "❌ APK file is too large: $APK_SIZE bytes (max: 5GB)"
+            exit 1
+          fi
+          
+          # Выводим информацию о файле
+          APK_SIZE_MB=$(echo "scale=2; $APK_SIZE / 1024 / 1024" | bc)
+          echo "✅ APK file found: $APK_FILE"
+          echo "📦 APK size: ${APK_SIZE_MB} MB (${APK_SIZE} bytes)"
+          echo "apk_size=${APK_SIZE}" >> $GITHUB_OUTPUT
     
       - name: Publish to RuStore
         env:
