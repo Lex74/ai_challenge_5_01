@@ -1,0 +1,50 @@
+name: Publish APK to RuStore
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'release/app-release.apk'
+
+jobs:
+  publish_to_rustore:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Получаем всю историю для работы с git
+    
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+    
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+    
+      - name: Verify APK file exists
+        id: check_apk
+        run: |
+          if [ ! -f "release/app-release.apk" ]; then
+            echo "❌ APK file not found: release/app-release.apk"
+            exit 1
+          else
+            echo "✅ APK file found: release/app-release.apk"
+            APK_SIZE=$(stat -f%z "release/app-release.apk" 2>/dev/null || stat -c%s "release/app-release.apk" 2>/dev/null || echo "0")
+            echo "APK size: ${APK_SIZE} bytes"
+          fi
+    
+      - name: Publish to RuStore
+        env:
+          RUSTORE_PRIVATE_KEY: ${{ secrets.RUSTORE_PRIVATE_KEY }}
+          RUSTORE_PACKAGE_NAME: ${{ secrets.RUSTORE_PACKAGE_NAME }}
+        run: |
+          python publish_rustore.py --apk-file release/app-release.apk
