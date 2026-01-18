@@ -56,7 +56,7 @@ def load_private_key(private_key_str: str) -> rsa.RSAPrivateKey:
         raise
 
 
-def get_jwe_token(private_key: rsa.RSAPrivateKey) -> Optional[str]:
+def get_jwe_token(private_key: rsa.RSAPrivateKey, max_retries: int = 3) -> Optional[str]:
     """Получает JWE-токен для RuStore API используя приватный ключ
     
     Согласно документации RuStore API:
@@ -66,6 +66,7 @@ def get_jwe_token(private_key: rsa.RSAPrivateKey) -> Optional[str]:
     
     Args:
         private_key: Приватный RSA ключ для подписи JWT токена
+        max_retries: Максимальное количество попыток при временных ошибках сервера
         
     Returns:
         JWE-токен или None в случае ошибки
@@ -75,108 +76,125 @@ def get_jwe_token(private_key: rsa.RSAPrivateKey) -> Optional[str]:
         logger.error("❌ Приватный ключ не передан (None)")
         return None
     
+    # Создаем JWT токен для запроса авторизации
+    now = datetime.utcnow()
+    payload = {
+        'iat': int(now.timestamp()),
+        'exp': int((now + timedelta(minutes=15)).timestamp()),  # Токен на 15 минут
+    }
+    
     try:
-        logger.info("🔐 Получаю JWE-токен через RuStore API...")
-        
-        # Создаем JWT токен для запроса авторизации
-        # Обычно для RuStore API используется JWT с подписью RSA
-        now = datetime.utcnow()
-        payload = {
-            'iat': int(now.timestamp()),
-            'exp': int((now + timedelta(minutes=15)).timestamp()),  # Токен на 15 минут
-        }
-        
         # Подписываем JWT токен приватным ключом
         jwt_token = jwt.encode(
             payload,
             private_key,
             algorithm='RS256'
         )
-        
-        # Отправляем запрос на получение JWE-токена
-        headers = {
-            'Content-Type': 'application/json'
-        }
-        
-        # Отправляем JWT токен для получения JWE-токена
-        # Точный формат запроса может отличаться, нужно проверить документацию
-        response = requests.post(
-            RUSTORE_AUTH_URL,
-            headers=headers,
-            json={'token': jwt_token},
-            timeout=30
-        )
-        
-        # Безопасная обработка ответа
-        if response.status_code == 200:
-            try:
-                data = response.json()
-                # JWE-токен может быть в разных полях ответа
-                jwe_token = data.get('token') or data.get('access_token') or data.get('jwe_token')
-                if jwe_token:
-                    logger.info("✅ JWE-токен успешно получен (действителен 15 минут)")
-                    return jwe_token
-                else:
-                    logger.warning("⚠️ JWE-токен не найден в ответе API, используем JWT токен")
-                    return jwt_token
-            except ValueError as json_error:
-                logger.error(f"❌ Ошибка при парсинге JSON ответа: {json_error}")
-                logger.warning("⚠️ Используем JWT токен напрямую")
-                return jwt_token
-        elif response.status_code == 401:
-            logger.error("❌ Ошибка авторизации: неверный приватный ключ или недостаточно прав")
-            logger.error("💡 Проверьте правильность приватного ключа в секретах GitHub")
-            return None
-        elif response.status_code == 403:
-            logger.error("❌ Доступ запрещен: недостаточно прав для получения токена")
-            logger.error("💡 Проверьте настройки ключа в консоли RuStore")
-            return None
-        elif response.status_code >= 500:
-            logger.error(f"❌ Ошибка сервера RuStore API: {response.status_code}")
-            logger.warning("⚠️ Используем JWT токен напрямую как fallback")
-            return jwt_token
-        else:
-            # Для других статусов логируем только статус, без полного ответа
-            logger.warning(f"⚠️ Получен статус {response.status_code} при получении JWE-токена")
-            # Не логируем полный ответ, чтобы не утечь чувствительную информацию
-            logger.warning("⚠️ Используем JWT токен напрямую")
-            return jwt_token
+    except Exception as jwt_error:
+        logger.error(f"❌ Ошибка при создании JWT токена: {jwt_error}")
+        return None
+    
+    # Отправляем запрос на получение JWE-токена с retry логикой
+    headers = {
+        'Content-Type': 'application/json'
+    }
+    
+    for attempt in range(1, max_retries + 1):
+        try:
+            if attempt > 1:
+                # Экспоненциальная задержка между попытками
+                delay = min(2 ** (attempt - 1), 10)  # Максимум 10 секунд
+                logger.info(f"🔄 Повторная попытка {attempt}/{max_retries} через {delay} секунд...")
+                time.sleep(delay)
+            else:
+                logger.info("🔐 Получаю JWE-токен через RuStore API...")
             
-    except requests.exceptions.Timeout:
-        logger.error("❌ Таймаут при запросе к RuStore API")
-        logger.warning("⚠️ Используем JWT токен напрямую как fallback")
-        try:
-            now = datetime.utcnow()
-            payload = {
-                'iat': int(now.timestamp()),
-                'exp': int((now + timedelta(minutes=15)).timestamp()),
-            }
-            return jwt.encode(payload, private_key, algorithm='RS256')
-        except Exception as jwt_error:
-            logger.error(f"❌ Ошибка при создании JWT токена: {jwt_error}")
+            # Отправляем JWT токен для получения JWE-токена
+            response = requests.post(
+                RUSTORE_AUTH_URL,
+                headers=headers,
+                json={'token': jwt_token},
+                timeout=30
+            )
+            
+            # Безопасная обработка ответа
+            if response.status_code == 200:
+                try:
+                    data = response.json()
+                    # JWE-токен может быть в разных полях ответа
+                    jwe_token = data.get('token') or data.get('access_token') or data.get('jwe_token')
+                    if jwe_token:
+                        logger.info("✅ JWE-токен успешно получен (действителен 15 минут)")
+                        return jwe_token
+                    else:
+                        logger.error("❌ JWE-токен не найден в ответе API")
+                        logger.error(f"💡 Ответ API: {list(data.keys()) if isinstance(data, dict) else 'не JSON'}")
+                        return None
+                except ValueError as json_error:
+                    logger.error(f"❌ Ошибка при парсинге JSON ответа: {json_error}")
+                    return None
+            elif response.status_code == 401:
+                logger.error("❌ Ошибка авторизации: неверный приватный ключ или недостаточно прав")
+                logger.error("💡 Проверьте правильность приватного ключа в секретах GitHub")
+                return None
+            elif response.status_code == 403:
+                logger.error("❌ Доступ запрещен: недостаточно прав для получения токена")
+                logger.error("💡 Проверьте настройки ключа в консоли RuStore")
+                return None
+            elif response.status_code in [502, 503, 504]:
+                # Временные ошибки сервера - повторяем запрос
+                if attempt < max_retries:
+                    logger.warning(f"⚠️ Временная ошибка сервера {response.status_code}, повторяю попытку...")
+                    continue
+                else:
+                    logger.error(f"❌ Ошибка сервера RuStore API после {max_retries} попыток: {response.status_code}")
+                    logger.error("💡 Сервер RuStore временно недоступен, попробуйте позже")
+                    return None
+            elif response.status_code >= 500:
+                # Другие ошибки сервера
+                logger.error(f"❌ Ошибка сервера RuStore API: {response.status_code}")
+                if attempt < max_retries:
+                    logger.warning(f"⚠️ Повторяю попытку {attempt + 1}/{max_retries}...")
+                    continue
+                else:
+                    return None
+            else:
+                # Для других статусов логируем только статус
+                logger.error(f"❌ Неожиданный статус ответа: {response.status_code}")
+                logger.error("💡 Проверьте документацию RuStore API или обратитесь в поддержку")
+                return None
+                
+        except requests.exceptions.Timeout:
+            if attempt < max_retries:
+                logger.warning(f"⚠️ Таймаут при запросе к RuStore API, повторяю попытку {attempt + 1}/{max_retries}...")
+                continue
+            else:
+                logger.error("❌ Таймаут при запросе к RuStore API после всех попыток")
+                logger.error("💡 Проверьте доступность API RuStore")
+                return None
+        except requests.exceptions.ConnectionError as e:
+            if attempt < max_retries:
+                logger.warning(f"⚠️ Ошибка подключения к RuStore API, повторяю попытку {attempt + 1}/{max_retries}...")
+                continue
+            else:
+                logger.error(f"❌ Ошибка подключения к RuStore API после всех попыток: {type(e).__name__}")
+                logger.error("💡 Проверьте доступность API RuStore и интернет-соединение")
+                return None
+        except requests.exceptions.RequestException as e:
+            if attempt < max_retries:
+                logger.warning(f"⚠️ Ошибка при запросе к RuStore API ({type(e).__name__}), повторяю попытку {attempt + 1}/{max_retries}...")
+                continue
+            else:
+                logger.error(f"❌ Ошибка при запросе к RuStore API после всех попыток: {type(e).__name__}")
+                return None
+        except Exception as e:
+            logger.error(f"❌ Неожиданная ошибка при получении JWE-токена: {type(e).__name__}")
+            logger.debug(f"Детали ошибки: {e}", exc_info=True)
             return None
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"❌ Ошибка подключения к RuStore API: {e}")
-        logger.error("💡 Проверьте доступность API RuStore")
-        return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Ошибка при запросе к RuStore API: {type(e).__name__}")
-        # Не логируем полный exception, чтобы не утечь внутреннюю информацию
-        logger.warning("⚠️ Используем JWT токен напрямую как fallback")
-        try:
-            now = datetime.utcnow()
-            payload = {
-                'iat': int(now.timestamp()),
-                'exp': int((now + timedelta(minutes=15)).timestamp()),
-            }
-            return jwt.encode(payload, private_key, algorithm='RS256')
-        except Exception as jwt_error:
-            logger.error(f"❌ Ошибка при создании JWT токена: {jwt_error}")
-            return None
-    except Exception as e:
-        logger.error(f"❌ Неожиданная ошибка при получении JWE-токена: {type(e).__name__}")
-        logger.debug(f"Детали ошибки: {e}", exc_info=True)
-        return None
+    
+    # Если дошли сюда, значит все попытки исчерпаны
+    logger.error(f"❌ Не удалось получить JWE-токен после {max_retries} попыток")
+    return None
 
 
 def create_version_draft(auth_token: str, package_name: str) -> Optional[str]:
