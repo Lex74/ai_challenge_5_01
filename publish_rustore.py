@@ -96,23 +96,62 @@ def get_jwe_token(private_key: rsa.RSAPrivateKey) -> Optional[str]:
             timeout=30
         )
         
+        # Безопасная обработка ответа
         if response.status_code == 200:
-            data = response.json()
-            # JWE-токен может быть в разных полях ответа
-            jwe_token = data.get('token') or data.get('access_token') or data.get('jwe_token') or jwt_token
-            logger.info("✅ JWE-токен успешно получен (действителен 15 минут)")
-            return jwe_token
+            try:
+                data = response.json()
+                # JWE-токен может быть в разных полях ответа
+                jwe_token = data.get('token') or data.get('access_token') or data.get('jwe_token')
+                if jwe_token:
+                    logger.info("✅ JWE-токен успешно получен (действителен 15 минут)")
+                    return jwe_token
+                else:
+                    logger.warning("⚠️ JWE-токен не найден в ответе API, используем JWT токен")
+                    return jwt_token
+            except ValueError as json_error:
+                logger.error(f"❌ Ошибка при парсинге JSON ответа: {json_error}")
+                logger.warning("⚠️ Используем JWT токен напрямую")
+                return jwt_token
+        elif response.status_code == 401:
+            logger.error("❌ Ошибка авторизации: неверный приватный ключ или недостаточно прав")
+            logger.error("💡 Проверьте правильность приватного ключа в секретах GitHub")
+            return None
+        elif response.status_code == 403:
+            logger.error("❌ Доступ запрещен: недостаточно прав для получения токена")
+            logger.error("💡 Проверьте настройки ключа в консоли RuStore")
+            return None
+        elif response.status_code >= 500:
+            logger.error(f"❌ Ошибка сервера RuStore API: {response.status_code}")
+            logger.warning("⚠️ Используем JWT токен напрямую как fallback")
+            return jwt_token
         else:
-            # Если endpoint не работает как ожидается, используем JWT напрямую
+            # Для других статусов логируем только статус, без полного ответа
             logger.warning(f"⚠️ Получен статус {response.status_code} при получении JWE-токена")
-            logger.warning(f"Ответ сервера: {response.text}")
+            # Не логируем полный ответ, чтобы не утечь чувствительную информацию
             logger.warning("⚠️ Используем JWT токен напрямую")
             return jwt_token
             
+    except requests.exceptions.Timeout:
+        logger.error("❌ Таймаут при запросе к RuStore API")
+        logger.warning("⚠️ Используем JWT токен напрямую как fallback")
+        try:
+            now = datetime.utcnow()
+            payload = {
+                'iat': int(now.timestamp()),
+                'exp': int((now + timedelta(minutes=15)).timestamp()),
+            }
+            return jwt.encode(payload, private_key, algorithm='RS256')
+        except Exception as jwt_error:
+            logger.error(f"❌ Ошибка при создании JWT токена: {jwt_error}")
+            return None
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"❌ Ошибка подключения к RuStore API: {e}")
+        logger.error("💡 Проверьте доступность API RuStore")
+        return None
     except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Ошибка при запросе к RuStore API: {e}")
-        # В случае ошибки используем JWT токен напрямую
-        logger.warning("⚠️ Используем JWT токен напрямую как JWE-токен")
+        logger.error(f"❌ Ошибка при запросе к RuStore API: {type(e).__name__}")
+        # Не логируем полный exception, чтобы не утечь внутреннюю информацию
+        logger.warning("⚠️ Используем JWT токен напрямую как fallback")
         try:
             now = datetime.utcnow()
             payload = {
@@ -124,7 +163,8 @@ def get_jwe_token(private_key: rsa.RSAPrivateKey) -> Optional[str]:
             logger.error(f"❌ Ошибка при создании JWT токена: {jwt_error}")
             return None
     except Exception as e:
-        logger.error(f"❌ Ошибка при получении JWE-токена: {e}", exc_info=True)
+        logger.error(f"❌ Неожиданная ошибка при получении JWE-токена: {type(e).__name__}")
+        logger.debug(f"Детали ошибки: {e}", exc_info=True)
         return None
 
 
@@ -152,13 +192,40 @@ def create_version_draft(auth_token: str, package_name: str) -> Optional[str]:
         )
         
         if response.status_code in [200, 201]:
-            data = response.json()
-            version_id = data.get('id') or data.get('versionId') or data.get('version_id')
-            logger.info(f"✅ Черновик версии создан, versionId: {version_id}")
-            return str(version_id)
+            try:
+                data = response.json()
+                version_id = data.get('id') or data.get('versionId') or data.get('version_id')
+                if version_id:
+                    logger.info(f"✅ Черновик версии создан, versionId: {version_id}")
+                    return str(version_id)
+                else:
+                    logger.error("❌ versionId не найден в ответе API")
+                    return None
+            except ValueError as json_error:
+                logger.error(f"❌ Ошибка при парсинге JSON ответа: {json_error}")
+                return None
+        elif response.status_code == 401:
+            logger.error("❌ Ошибка авторизации: неверный токен или токен истек")
+            logger.error("💡 Проверьте правильность приватного ключа")
+            return None
+        elif response.status_code == 403:
+            logger.error("❌ Доступ запрещен: недостаточно прав для создания версии")
+            logger.error("💡 Проверьте настройки ключа в консоли RuStore")
+            return None
+        elif response.status_code == 404:
+            logger.error(f"❌ Приложение не найдено: {package_name}")
+            logger.error("💡 Проверьте правильность package name")
+            return None
+        elif response.status_code == 400:
+            logger.error("❌ Неверный запрос при создании версии")
+            logger.error("💡 Проверьте формат данных запроса")
+            return None
+        elif response.status_code >= 500:
+            logger.error(f"❌ Ошибка сервера RuStore API: {response.status_code}")
+            return None
         else:
             logger.error(f"❌ Ошибка при создании версии: {response.status_code}")
-            logger.error(f"Ответ сервера: {response.text}")
+            # Не логируем полный ответ для безопасности
             return None
             
     except requests.exceptions.RequestException as e:
@@ -204,9 +271,33 @@ def upload_apk(auth_token: str, package_name: str, version_id: str, apk_path: st
         if response.status_code in [200, 201]:
             logger.info("✅ APK файл успешно загружен")
             return True
+        elif response.status_code == 401:
+            logger.error("❌ Ошибка авторизации: неверный токен или токен истек")
+            logger.error("💡 Проверьте правильность приватного ключа")
+            return False
+        elif response.status_code == 403:
+            logger.error("❌ Доступ запрещен: недостаточно прав для загрузки APK")
+            logger.error("💡 Проверьте настройки ключа в консоли RuStore")
+            return False
+        elif response.status_code == 404:
+            logger.error(f"❌ Версия или приложение не найдено")
+            logger.error(f"💡 Version ID: {version_id}, Package: {package_name}")
+            return False
+        elif response.status_code == 400:
+            logger.error("❌ Неверный запрос при загрузке APK")
+            logger.error("💡 Проверьте параметры запроса и формат APK файла")
+            return False
+        elif response.status_code == 413:
+            logger.error("❌ APK файл слишком большой")
+            logger.error("💡 Максимальный размер APK: 5GB")
+            return False
+        elif response.status_code >= 500:
+            logger.error(f"❌ Ошибка сервера RuStore API: {response.status_code}")
+            logger.error("💡 Попробуйте повторить запрос позже")
+            return False
         else:
             logger.error(f"❌ Ошибка при загрузке APK: {response.status_code}")
-            logger.error(f"Ответ сервера: {response.text}")
+            # Не логируем полный ответ для безопасности
             return False
             
     except FileNotFoundError:
@@ -241,11 +332,29 @@ def submit_for_moderation(auth_token: str, package_name: str, version_id: str) -
         if response.status_code in [200, 201, 202]:
             logger.info("✅ Версия успешно отправлена на модерацию")
             return True
+        elif response.status_code == 401:
+            logger.error("❌ Ошибка авторизации: неверный токен или токен истек")
+            logger.error("💡 Проверьте правильность приватного ключа")
+            return False
+        elif response.status_code == 403:
+            logger.error("❌ Доступ запрещен: недостаточно прав для отправки на модерацию")
+            logger.error("💡 Проверьте настройки ключа в консоли RuStore")
+            return False
+        elif response.status_code == 404:
+            # 404 может означать, что версия уже отправлена или не существует
+            logger.warning("⚠️ Версия не найдена или уже отправлена на модерацию")
+            return True  # Не считаем это критической ошибкой
+        elif response.status_code == 400:
+            logger.warning("⚠️ Неверный запрос при отправке на модерацию")
+            logger.warning("💡 Возможно, версия уже отправлена или требуется дополнительная информация")
+            return False
+        elif response.status_code >= 500:
+            logger.error(f"❌ Ошибка сервера RuStore API: {response.status_code}")
+            return False
         else:
             logger.warning(f"⚠️ Получен статус {response.status_code} при отправке на модерацию")
-            logger.warning(f"Ответ сервера: {response.text}")
-            # Не считаем это критической ошибкой, версия может быть уже отправлена
-            return response.status_code == 404  # 404 может означать, что версия уже отправлена
+            # Не логируем полный ответ для безопасности
+            return False
             
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ Ошибка при отправке на модерацию: {e}", exc_info=True)
@@ -371,15 +480,41 @@ def main():
     package_name = args.package_name or os.getenv('RUSTORE_PACKAGE_NAME')
     private_key_str = args.private_key or os.getenv('RUSTORE_PRIVATE_KEY')
     
-    # Проверяем обязательные параметры
+    # Проверяем обязательные параметры с детальными сообщениями
+    missing_params = []
+    
     if not package_name:
-        logger.error("❌ Package name не указан. Укажите через --package-name или RUSTORE_PACKAGE_NAME")
-        sys.exit(1)
+        missing_params.append("RUSTORE_PACKAGE_NAME")
+        logger.error("❌ Package name не указан")
+        logger.error("💡 Укажите через --package-name или установите переменную окружения RUSTORE_PACKAGE_NAME")
+        logger.error("💡 Пример: export RUSTORE_PACKAGE_NAME=com.example.myapp")
     
     if not private_key_str:
-        logger.error("❌ Приватный ключ не указан. Укажите через --private-key или RUSTORE_PRIVATE_KEY")
+        missing_params.append("RUSTORE_PRIVATE_KEY")
+        logger.error("❌ Приватный ключ не указан")
+        logger.error("💡 Укажите через --private-key или установите переменную окружения RUSTORE_PRIVATE_KEY")
         logger.error("💡 Приватный ключ можно получить в консоли разработчика RuStore (console.rustore.ru)")
-        logger.error("💡 Ключ должен быть в формате PEM с заголовками -----BEGIN PRIVATE KEY----- и -----END PRIVATE KEY-----")
+        logger.error("💡 Ключ должен быть в формате PEM с заголовками:")
+        logger.error("   -----BEGIN PRIVATE KEY-----")
+        logger.error("   ...")
+        logger.error("   -----END PRIVATE KEY-----")
+    
+    if missing_params:
+        logger.error("=" * 60)
+        logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Отсутствуют обязательные параметры")
+        logger.error(f"   Отсутствующие параметры: {', '.join(missing_params)}")
+        logger.error("=" * 60)
+        logger.error("💡 Для GitHub Actions добавьте секреты в настройках репозитория:")
+        logger.error("   Settings → Secrets and variables → Actions → New repository secret")
+        sys.exit(1)
+    
+    # Дополнительная валидация параметров
+    if not package_name.strip():
+        logger.error("❌ Package name пустой")
+        sys.exit(1)
+    
+    if not private_key_str.strip():
+        logger.error("❌ Приватный ключ пустой")
         sys.exit(1)
     
     # Публикуем APK
