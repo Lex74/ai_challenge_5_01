@@ -6,13 +6,19 @@ import os
 import sys
 import time
 from typing import Optional, Dict, Any
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import requests
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.backends import default_backend
-import jwt
+import base64
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения из .env файла
+load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
@@ -23,20 +29,33 @@ logger = logging.getLogger(__name__)
 
 # RuStore API base URL
 RUSTORE_API_BASE = "https://public-api.rustore.ru/public/v1"
-RUSTORE_AUTH_URL = f"{RUSTORE_API_BASE}/auth"
+# URL авторизации без версии, согласно документации RuStore
+RUSTORE_AUTH_URL = "https://public-api.rustore.ru/public/auth"
 
 
 def load_private_key(private_key_str: str) -> rsa.RSAPrivateKey:
-    """Загружает приватный RSA ключ из строки"""
+    """Загружает приватный RSA ключ из строки (поддерживает PEM и base64 форматы)"""
     try:
         if not private_key_str or not private_key_str.strip():
             raise ValueError("Приватный ключ пустой")
         
-        # Убеждаемся, что ключ имеет правильный формат PEM
         key_str = private_key_str.strip()
-        if not key_str.startswith('-----BEGIN'):
-            # Если ключ без заголовков, добавляем их
-            if 'BEGIN' not in key_str:
+        
+        # Проверяем, является ли ключ base64 (начинается с MII... и не содержит BEGIN)
+        if not key_str.startswith('-----BEGIN') and 'BEGIN' not in key_str:
+            # Пробуем загрузить как base64 (как в примере RuStore)
+            try:
+                key_bytes = base64.b64decode(key_str)
+                private_key = serialization.load_der_private_key(
+                    key_bytes,
+                    password=None,
+                    backend=default_backend()
+                )
+                logger.info("✅ Приватный ключ успешно загружен (base64 формат)")
+                return private_key
+            except Exception as base64_error:
+                logger.debug(f"Не удалось загрузить как base64: {base64_error}")
+                # Пробуем добавить PEM заголовки
                 key_str = f"-----BEGIN PRIVATE KEY-----\n{key_str}\n-----END PRIVATE KEY-----"
         
         # Пробуем загрузить ключ в формате PEM
@@ -45,27 +64,60 @@ def load_private_key(private_key_str: str) -> rsa.RSAPrivateKey:
             password=None,
             backend=default_backend()
         )
-        logger.info("✅ Приватный ключ успешно загружен")
+        logger.info("✅ Приватный ключ успешно загружен (PEM формат)")
         return private_key
     except ValueError as e:
         logger.error(f"❌ Ошибка валидации приватного ключа: {e}")
         raise
     except Exception as e:
         logger.error(f"❌ Ошибка при загрузке приватного ключа: {e}")
-        logger.error("💡 Убедитесь, что ключ в формате PEM с заголовками -----BEGIN PRIVATE KEY----- и -----END PRIVATE KEY-----")
+        logger.error("💡 Убедитесь, что ключ в формате PEM или base64")
         raise
 
 
-def get_jwe_token(private_key: rsa.RSAPrivateKey, max_retries: int = 3) -> Optional[str]:
+def create_signature(private_key: rsa.RSAPrivateKey, key_id: str, timestamp: str) -> str:
+    """Создает RSA-подпись SHA-512 от конкатенации keyId + timestamp
+    
+    Согласно документации RuStore API:
+    - Сообщение: конкатенация keyId + timestamp (без разделителей)
+    - Алгоритм: SHA512withRSA (PKCS#1 v1.5)
+    - Результат кодируется в Base64
+    
+    Args:
+        private_key: Приватный RSA ключ
+        key_id: ID ключа
+        timestamp: Временная метка в формате ISO 8601
+        
+    Returns:
+        Base64-кодированная подпись
+    """
+    # Конкатенируем keyId + timestamp (без разделителей, согласно документации)
+    message = f"{key_id}{timestamp}".encode('utf-8')
+    
+    # Подписываем приватным ключом с алгоритмом SHA512withRSA
+    # Метод sign() автоматически вычисляет SHA-512 хеш и подписывает его
+    signature = private_key.sign(
+        message,
+        padding.PKCS1v15(),
+        hashes.SHA512()
+    )
+    
+    # Кодируем в Base64
+    return base64.b64encode(signature).decode('utf-8')
+
+
+def get_jwe_token(private_key: rsa.RSAPrivateKey, key_id: str, max_retries: int = 3) -> Optional[str]:
     """Получает JWE-токен для RuStore API используя приватный ключ
     
     Согласно документации RuStore API:
     - Используется POST /public/auth/ для получения токена
+    - Отправляются keyId, timestamp и signature (RSA-подпись SHA-512)
     - Токен действителен 900 секунд (15 минут)
-    - Токен передается в заголовке Authorization: API-key {token}
+    - Токен передается в заголовке Public-Token: {token}
     
     Args:
-        private_key: Приватный RSA ключ для подписи JWT токена
+        private_key: Приватный RSA ключ для создания подписи
+        key_id: ID ключа из консоли RuStore
         max_retries: Максимальное количество попыток при временных ошибках сервера
         
     Returns:
@@ -76,22 +128,9 @@ def get_jwe_token(private_key: rsa.RSAPrivateKey, max_retries: int = 3) -> Optio
         logger.error("❌ Приватный ключ не передан (None)")
         return None
     
-    # Создаем JWT токен для запроса авторизации
-    now = datetime.utcnow()
-    payload = {
-        'iat': int(now.timestamp()),
-        'exp': int((now + timedelta(minutes=15)).timestamp()),  # Токен на 15 минут
-    }
-    
-    try:
-        # Подписываем JWT токен приватным ключом
-        jwt_token = jwt.encode(
-            payload,
-            private_key,
-            algorithm='RS256'
-        )
-    except Exception as jwt_error:
-        logger.error(f"❌ Ошибка при создании JWT токена: {jwt_error}")
+    if not key_id or not key_id.strip():
+        logger.error("❌ Key ID не указан")
+        logger.error("💡 Укажите RUSTORE_KEY_ID в секретах GitHub")
         return None
     
     # Отправляем запрос на получение JWE-токена с retry логикой
@@ -109,11 +148,30 @@ def get_jwe_token(private_key: rsa.RSAPrivateKey, max_retries: int = 3) -> Optio
             else:
                 logger.info("🔐 Получаю JWE-токен через RuStore API...")
             
-            # Отправляем JWT токен для получения JWE-токена
+            # Создаем timestamp в формате ISO 8601 с микросекундами (как в примере RuStore)
+            # Пример из документации: 2022-07-08T13:24:41.8328711+03:00
+            now = datetime.now(timezone.utc)
+            timestamp = now.isoformat(timespec='microseconds')
+            
+            # Создаем подпись
+            try:
+                signature = create_signature(private_key, key_id, timestamp)
+            except Exception as sig_error:
+                logger.error(f"❌ Ошибка при создании подписи: {sig_error}")
+                return None
+            
+            # Формируем тело запроса
+            payload = {
+                'keyId': key_id,
+                'timestamp': timestamp,
+                'signature': signature
+            }
+            
+            # Отправляем запрос
             response = requests.post(
                 RUSTORE_AUTH_URL,
                 headers=headers,
-                json={'token': jwt_token},
+                json=payload,
                 timeout=30
             )
             
@@ -121,34 +179,61 @@ def get_jwe_token(private_key: rsa.RSAPrivateKey, max_retries: int = 3) -> Optio
             if response.status_code == 200:
                 try:
                     data = response.json()
-                    # JWE-токен может быть в разных полях ответа
-                    jwe_token = data.get('token') or data.get('access_token') or data.get('jwe_token')
+                    
+                    # Проверяем код ответа согласно документации RuStore
+                    response_code = data.get('code')
+                    if response_code != 'OK':
+                        error_message = data.get('message') or 'Неизвестная ошибка'
+                        logger.error(f"❌ API вернул ошибку: {error_message}")
+                        return None
+                    
+                    # JWE-токен находится в body.jwe согласно документации RuStore
+                    body = data.get('body', {})
+                    jwe_token = body.get('jwe') if isinstance(body, dict) else None
+                    
+                    # Fallback для обратной совместимости
+                    if not jwe_token:
+                        jwe_token = data.get('jwe') or data.get('token') or data.get('access_token')
+                    
                     if jwe_token:
-                        logger.info("✅ JWE-токен успешно получен (действителен 15 минут)")
+                        ttl = body.get('ttl', 900) if isinstance(body, dict) else 900
+                        logger.info(f"✅ JWE-токен успешно получен (действителен {ttl} секунд)")
                         return jwe_token
                     else:
                         logger.error("❌ JWE-токен не найден в ответе API")
-                        logger.error(f"💡 Ответ API: {list(data.keys()) if isinstance(data, dict) else 'не JSON'}")
+                        logger.error(f"💡 Поля в ответе: {list(data.keys()) if isinstance(data, dict) else 'не JSON'}")
                         return None
                 except ValueError as json_error:
                     logger.error(f"❌ Ошибка при парсинге JSON ответа: {json_error}")
+                    logger.error(f"💡 Ответ сервера: {response.text[:200]}...")
                     return None
             elif response.status_code == 401:
-                logger.error("❌ Ошибка авторизации: неверный приватный ключ или недостаточно прав")
-                logger.error("💡 Проверьте правильность приватного ключа в секретах GitHub")
+                logger.error("❌ Ошибка авторизации: неверный приватный ключ, keyId или подпись")
+                logger.error("💡 Проверьте правильность приватного ключа и keyId в секретах GitHub")
+                # Не повторяем при 401 - это ошибка конфигурации
                 return None
             elif response.status_code == 403:
                 logger.error("❌ Доступ запрещен: недостаточно прав для получения токена")
                 logger.error("💡 Проверьте настройки ключа в консоли RuStore")
                 return None
+            elif response.status_code == 400:
+                logger.error("❌ Неверный запрос при получении токена")
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('message') or error_data.get('error') or 'Неизвестная ошибка'
+                    logger.error(f"💡 Детали: {error_msg}")
+                except:
+                    logger.error(f"💡 Ответ сервера: {response.text[:200]}...")
+                return None
             elif response.status_code in [502, 503, 504]:
                 # Временные ошибки сервера - повторяем запрос
+                logger.debug(f"Ответ сервера ({response.status_code}): {response.text[:500]}")
                 if attempt < max_retries:
                     logger.warning(f"⚠️ Временная ошибка сервера {response.status_code}, повторяю попытку...")
                     continue
                 else:
                     logger.error(f"❌ Ошибка сервера RuStore API после {max_retries} попыток: {response.status_code}")
-                    logger.error("💡 Сервер RuStore временно недоступен, попробуйте позже")
+                    logger.error(f"💡 Ответ сервера: {response.text[:500]}")
                     return None
             elif response.status_code >= 500:
                 # Другие ошибки сервера
@@ -161,7 +246,12 @@ def get_jwe_token(private_key: rsa.RSAPrivateKey, max_retries: int = 3) -> Optio
             else:
                 # Для других статусов логируем только статус
                 logger.error(f"❌ Неожиданный статус ответа: {response.status_code}")
-                logger.error("💡 Проверьте документацию RuStore API или обратитесь в поддержку")
+                try:
+                    error_data = response.json()
+                    error_msg = error_data.get('message') or error_data.get('error') or 'Неизвестная ошибка'
+                    logger.error(f"💡 Детали: {error_msg}")
+                except:
+                    pass
                 return None
                 
         except requests.exceptions.Timeout:
@@ -221,7 +311,7 @@ def create_version_draft(auth_token: str, package_name: str) -> Optional[str]:
         
         url = f"{RUSTORE_API_BASE}/application/{package_name}/version"
         headers = {
-            'Authorization': f'API-key {auth_token}',
+            'Public-Token': auth_token,
             'Content-Type': 'application/json'
         }
         
@@ -246,13 +336,14 @@ def create_version_draft(auth_token: str, package_name: str) -> Optional[str]:
                     return str(version_id)
                 else:
                     logger.error("❌ versionId не найден в ответе API")
+                    logger.debug(f"Ответ API: {data}")
                     return None
             except ValueError as json_error:
                 logger.error(f"❌ Ошибка при парсинге JSON ответа: {json_error}")
                 return None
         elif response.status_code == 401:
             logger.error("❌ Ошибка авторизации: неверный токен или токен истек")
-            logger.error("💡 Проверьте правильность приватного ключа")
+            logger.error(f"💡 Ответ сервера: {response.text[:500]}")
             return None
         elif response.status_code == 403:
             logger.error("❌ Доступ запрещен: недостаточно прав для создания версии")
@@ -263,8 +354,25 @@ def create_version_draft(auth_token: str, package_name: str) -> Optional[str]:
             logger.error("💡 Проверьте правильность package name")
             return None
         elif response.status_code == 400:
-            logger.error("❌ Неверный запрос при создании версии")
-            logger.error("💡 Проверьте формат данных запроса")
+            # Проверяем, есть ли уже черновик версии
+            try:
+                error_data = response.json()
+                error_message = error_data.get('message', '')
+                
+                # Если уже есть черновик, извлекаем его ID
+                if 'already have draft version with ID' in error_message:
+                    import re
+                    match = re.search(r'ID\s*=\s*(\d+)', error_message)
+                    if match:
+                        existing_version_id = match.group(1)
+                        logger.info(f"📝 Найден существующий черновик версии: {existing_version_id}")
+                        return existing_version_id
+                
+                logger.error("❌ Неверный запрос при создании версии")
+                logger.error(f"💡 Ответ сервера: {error_message}")
+            except:
+                logger.error("❌ Неверный запрос при создании версии")
+                logger.error(f"💡 Ответ сервера: {response.text[:500]}")
             return None
         elif response.status_code >= 500:
             logger.error(f"❌ Ошибка сервера RuStore API: {response.status_code}")
@@ -334,7 +442,7 @@ def upload_apk(auth_token: str, package_name: str, version_id: str, apk_path: st
         }
         
         headers = {
-            'Authorization': f'API-key {auth_token}'
+            'Public-Token': auth_token
         }
         
         with open(apk_path, 'rb') as apk_file:
@@ -366,8 +474,20 @@ def upload_apk(auth_token: str, package_name: str, version_id: str, apk_path: st
             logger.error(f"💡 Version ID: {version_id}, Package: {package_name}")
             return False
         elif response.status_code == 400:
-            logger.error("❌ Неверный запрос при загрузке APK")
-            logger.error("💡 Проверьте параметры запроса и формат APK файла")
+            # Проверяем, не загружен ли APK уже
+            try:
+                error_data = response.json()
+                error_message = error_data.get('message', '')
+                
+                if 'already uploaded' in error_message.lower():
+                    logger.info("✅ APK файл уже загружен в эту версию")
+                    return True
+                
+                logger.error("❌ Неверный запрос при загрузке APK")
+                logger.error(f"💡 Ответ сервера: {error_message}")
+            except:
+                logger.error("❌ Неверный запрос при загрузке APK")
+                logger.error(f"💡 Ответ сервера: {response.text[:500]}")
             return False
         elif response.status_code == 413:
             logger.error("❌ APK файл слишком большой")
@@ -422,7 +542,7 @@ def submit_for_moderation(auth_token: str, package_name: str, version_id: str) -
         
         url = f"{RUSTORE_API_BASE}/application/{package_name}/version/{version_id}/submit"
         headers = {
-            'Authorization': f'API-key {auth_token}',
+            'Public-Token': auth_token,
             'Content-Type': 'application/json'
         }
         
@@ -468,7 +588,7 @@ def submit_for_moderation(auth_token: str, package_name: str, version_id: str) -
         return False
 
 
-def publish_apk_to_rustore(apk_path: str, private_key_str: str, package_name: str) -> bool:
+def publish_apk_to_rustore(apk_path: str, private_key_str: str, package_name: str, key_id: Optional[str] = None) -> bool:
     """Основная функция для публикации APK в RuStore
     
     Args:
@@ -522,7 +642,7 @@ def publish_apk_to_rustore(apk_path: str, private_key_str: str, package_name: st
         private_key = load_private_key(private_key_str)
         
         # Получаем JWE-токен
-        auth_token = get_jwe_token(private_key)
+        auth_token = get_jwe_token(private_key, key_id)
         if not auth_token:
             logger.error("❌ Не удалось получить JWE-токен")
             return False
@@ -547,18 +667,9 @@ def publish_apk_to_rustore(apk_path: str, private_key_str: str, package_name: st
             logger.error("❌ Не удалось загрузить APK файл")
             return False
         
-        # Небольшая задержка перед отправкой на модерацию
-        time.sleep(2)
-        
-        # Отправляем на модерацию
-        submit_success = submit_for_moderation(auth_token, package_name, version_id)
-        if not submit_success:
-            logger.warning("⚠️ Не удалось отправить версию на модерацию, но APK загружен")
-            logger.info("💡 Возможно, версия уже отправлена или требуется ручная отправка")
-            logger.info(f"💡 Version ID: {version_id}, Package: {package_name}")
-        
+        logger.info(f"💡 Version ID: {version_id}, Package: {package_name}")
         logger.info("=" * 60)
-        logger.info("✅ Публикация APK завершена")
+        logger.info("✅ APK успешно загружен в RuStore")
         logger.info("=" * 60)
         return True
         
@@ -598,6 +709,12 @@ def main():
         default=None,
         help='Приватный RSA ключ для RuStore API (или из переменной окружения RUSTORE_PRIVATE_KEY)'
     )
+    parser.add_argument(
+        '--key-id',
+        type=str,
+        default=None,
+        help='ID ключа API RuStore (или из переменной окружения RUSTORE_KEY_ID)'
+    )
     
     args = parser.parse_args()
     
@@ -605,6 +722,7 @@ def main():
     apk_path = args.apk_file
     package_name = args.package_name or os.getenv('RUSTORE_PACKAGE_NAME')
     private_key_str = args.private_key or os.getenv('RUSTORE_PRIVATE_KEY')
+    key_id = args.key_id or os.getenv('RUSTORE_KEY_ID')
     
     # Проверяем обязательные параметры с детальными сообщениями
     missing_params = []
@@ -625,6 +743,12 @@ def main():
         logger.error("   ...")
         logger.error("   -----END PRIVATE KEY-----")
     
+    if not key_id:
+        missing_params.append("RUSTORE_KEY_ID")
+        logger.error("❌ Key ID не указан")
+        logger.error("💡 Укажите через --key-id или установите переменную окружения RUSTORE_KEY_ID")
+        logger.error("💡 Key ID можно получить в консоли разработчика RuStore при создании ключа")
+    
     if missing_params:
         logger.error("=" * 60)
         logger.error("❌ КРИТИЧЕСКАЯ ОШИБКА: Отсутствуют обязательные параметры")
@@ -644,7 +768,7 @@ def main():
         sys.exit(1)
     
     # Публикуем APK
-    success = publish_apk_to_rustore(apk_path, private_key_str, package_name)
+    success = publish_apk_to_rustore(apk_path, private_key_str, package_name, key_id)
     
     if not success:
         logger.error("❌ Публикация не удалась")
