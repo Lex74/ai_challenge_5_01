@@ -63,5 +63,6 @@ jobs:
         env:
           RUSTORE_PRIVATE_KEY: ${{ secrets.RUSTORE_PRIVATE_KEY }}
           RUSTORE_PACKAGE_NAME: ${{ secrets.RUSTORE_PACKAGE_NAME }}
+          RUSTORE_KEY_ID: ${{ secrets.RUSTORE_KEY_ID }}
         run: |
           python publish_rustore.py --apk-file release/app-release.apk
