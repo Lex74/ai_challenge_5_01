@@ -468,6 +468,56 @@ python publish_rustore.py --apk-file release/app-release.apk
 - Приватный RSA ключ из консоли RuStore
 - Package name приложения в RuStore
 
+### CLI агент для OLLama
+
+Проект включает CLI агент для работы с моделями OLLama через командную строку:
+
+**Установка OLLama:**
+```bash
+# macOS
+brew install ollama
+brew services start ollama
+
+# Установка модели
+ollama pull qwen2.5:7b
+```
+
+**Использование CLI агента:**
+
+```bash
+# Интерактивный режим (по умолчанию использует qwen2.5:7b)
+python ollama_cli.py
+
+# Интерактивный режим с конкретной моделью
+python ollama_cli.py -m qwen2.5:7b
+
+# Одноразовый запрос
+python ollama_cli.py -m qwen2.5:7b -p "Привет! Расскажи о себе"
+
+# Показать список доступных моделей
+python ollama_cli.py --list-models
+```
+
+**Команды в интерактивном режиме:**
+- `/help` - показать справку по командам
+- `/models` - показать список доступных моделей
+- `/switch <model>` - переключиться на другую модель
+- `/clear` - очистить историю диалога
+- `/history` - показать историю диалога
+- `/exit` или `/quit` - выйти из программы
+
+**Примеры:**
+```bash
+# Запуск интерактивного режима
+python ollama_cli.py
+
+# Быстрый запрос
+python ollama_cli.py -p "Напиши функцию на Python для сортировки списка"
+
+# Использование другой модели
+python ollama_cli.py -m nomic-embed-text -p "Что такое эмбеддинги?"
+```
+
 ## Примечания
 
 - Длинные ответы автоматически разбиваются на части (лимит Telegram - 4096 символов)
